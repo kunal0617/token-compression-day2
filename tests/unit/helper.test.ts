@@ -191,7 +191,8 @@ describe("isolated additive-only evidence helper", () => {
 
   it("aborts an isolated hosted helper session on timeout", async () => {
     let aborted = false;
-    const transport = new HostedCopilotHelperTransport(async () => ({
+    const transport = new HostedCopilotHelperTransport(async (configuration) => ({
+      configurationDigest: canonicalJsonDigest(configuration),
       start: async () => undefined,
       createSession: async () => ({
         sendAndWait: async () => new Promise(() => undefined),
@@ -227,6 +228,41 @@ describe("isolated additive-only evidence helper", () => {
       })
     ).rejects.toThrow();
     expect(aborted).toBe(true);
+  });
+
+  it("rejects a hosted helper client that does not attest empty mode", async () => {
+    const transport = new HostedCopilotHelperTransport(async () => ({
+      configurationDigest: canonicalJsonDigest("wrong"),
+      start: async () => undefined,
+      createSession: async () => {
+        throw new Error("must not create a session");
+      },
+      stop: async () => []
+    }));
+    const prompt = "prompt";
+    const bytes = Buffer.from(prompt, "utf8");
+    const assessedSource = {
+      sourceId: "helper-prompt",
+      bytes,
+      trustClass: "external-untrusted" as const
+    };
+    const assessment = assessSecurity([assessedSource]);
+    const authorization = authorizeExternalSend({
+      payload: bytes,
+      assessment,
+      explicitApproval: true,
+      assessedSource
+    });
+    expect(authorization.ok).toBe(true);
+    if (!authorization.ok) return;
+    await expect(
+      transport.complete(prompt, 100, {
+        networkApproved: true,
+        assessment,
+        authorization: authorization.value,
+        assessedSource
+      })
+    ).rejects.toThrow(/attest/i);
   });
 
   it("rejects suggestions for obligations already satisfied in the shown snapshot", async () => {

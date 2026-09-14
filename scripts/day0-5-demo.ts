@@ -219,7 +219,13 @@ try {
     settings: {
       modelId: "recorded-offline",
       permissionDigest: canonicalJsonDigest("read-only"),
-      adapterId: "recorded-fallback"
+      adapterId: "recorded-fallback",
+      executableDigest: canonicalJsonDigest(
+        "recorded-fallback-executable"
+      ),
+      protocolDigest: canonicalJsonDigest(
+        "recorded-fallback-protocol"
+      )
     },
     seed: 20260915,
     liveOptIn: false

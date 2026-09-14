@@ -1,13 +1,15 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import {
+  copyFileSync,
+  mkdtempSync,
+  rmSync
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import { describe, expect, it } from "vitest";
 
-import type { CanonicalManifest } from "../../src/contracts/types.js";
 import type { VersionedProducer } from "../../src/contracts/providers.js";
-import { canonicalJson } from "../../src/core/canonical.js";
 import { sha256Base64Url } from "../../src/core/hash.js";
 import { prepareContext } from "../../src/pipeline/prepare.js";
 import { ContextStore } from "../../src/storage/store.js";
@@ -18,59 +20,32 @@ import {
 } from "../../src/registry/registry.js";
 
 describe("producer registry migration", () => {
-  it("keeps legacy v1 committed runs verifiable", async () => {
+  it("keeps a store produced by the actual v1 implementation verifiable", () => {
     const directory = mkdtempSync(join(tmpdir(), "ctxo-registry-v1-"));
     const storePath = join(directory, "context.sqlite");
+    const runId = "a3895336-1cc6-42ce-9f5f-7258a96ef291";
     try {
-      const prepared = await prepareContext({
-        promptText: "Inspect this trace.",
-        contextTexts: [
-          {
-            label: "legacy.log",
-            text: "long repeated legacy payload\n".repeat(100)
-          }
-        ],
+      copyFileSync(
+        resolve("fixtures", "migration", "v1-store.sqlite"),
         storePath
-      });
-      expect(prepared.ok).toBe(true);
-      if (!prepared.ok) return;
-      const {
-        producerRegistry: _producerRegistry,
-        evidenceGate: _evidenceGate,
-        ...manifestWithoutRegistry
-      } = prepared.value.package.manifest;
-      const legacyManifest: CanonicalManifest = {
-        ...manifestWithoutRegistry,
-        formatVersion: 1
-      };
-      const parsed = JSON.parse(canonicalJson(legacyManifest)) as Record<
-        string,
-        unknown
-      >;
-      delete parsed.producerRegistry;
-      const manifestJson = canonicalJson(parsed);
-      const digest = sha256Base64Url(Buffer.from(manifestJson, "utf8"));
-      const database = new DatabaseSync(storePath);
-      database.exec("BEGIN IMMEDIATE");
-      database
-        .prepare(
-          "UPDATE manifests SET canonical_json=?, digest=? WHERE run_id=?"
-        )
-        .run(manifestJson, digest, prepared.value.package.runId);
-      database
-        .prepare("UPDATE runs SET manifest_hash=? WHERE run_id=?")
-        .run(digest, prepared.value.package.runId);
-      database
-        .prepare("DELETE FROM run_producers WHERE run_id=?")
-        .run(prepared.value.package.runId);
-      database.exec("COMMIT");
-      database.close();
-
+      );
       const store = new ContextStore(storePath);
       try {
-        expect(verifyStoredRun(store, prepared.value.package.runId).ok).toBe(
-          true
-        );
+        const verified = verifyStoredRun(store, runId);
+        expect(verified.ok).toBe(true);
+        if (!verified.ok) return;
+        expect(verified.value.manifest.formatVersion).toBe(1);
+        expect(verified.value.manifest.policy).toBeUndefined();
+        expect(
+          verified.value.manifest.artifacts.every(
+            (artifact) => artifact.outcome === undefined
+          )
+        ).toBe(true);
+        expect(
+          store.retrieve(
+            verified.value.manifest.omissions[0]?.handle ?? ""
+          ).ok
+        ).toBe(true);
       } finally {
         store.close();
       }

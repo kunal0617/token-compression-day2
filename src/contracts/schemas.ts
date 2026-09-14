@@ -127,6 +127,13 @@ const transformReasonSchema = z.enum([
   "volatile-template",
   "ci-wrapper"
 ]);
+const legacyTransformReasonSchema = z.enum([
+  "exact-consecutive-repetition",
+  "exact-nonconsecutive-repetition",
+  "success-chatter",
+  "scoped-boilerplate",
+  "volatile-template"
+]);
 
 const plannedTransformSchema = byteRangeSchema
   .extend({
@@ -156,6 +163,12 @@ const omissionSchema = byteRangeSchema
     sourceCount: z.number().int().positive()
   })
   .strict();
+const legacyPlannedTransformSchema = plannedTransformSchema.safeExtend({
+  reason: legacyTransformReasonSchema
+});
+const legacyOmissionSchema = omissionSchema.safeExtend({
+  reason: legacyTransformReasonSchema
+});
 
 const outputMappingSchema = z
   .object({
@@ -187,7 +200,7 @@ const evidenceMappingSchema = z
   })
   .strict();
 
-const artifactManifestSchema = z
+const artifactManifestBaseSchema = z
   .object({
     artifactId: z.string().min(1),
     ordinal: z.number().int().nonnegative(),
@@ -201,10 +214,13 @@ const artifactManifestSchema = z
     hasAnsi: z.boolean(),
     completeness: z.enum(["complete", "truncated", "unknown"]),
     completenessReason: z.string().min(1),
-    outcome: z.enum(["green", "red", "unknown"]),
     classification: artifactClassificationSchema
   })
   .strict();
+const legacyArtifactManifestSchema = artifactManifestBaseSchema;
+const artifactManifestSchema = artifactManifestBaseSchema.extend({
+  outcome: z.enum(["green", "red", "unknown"])
+});
 
 const tokenMeasurementSchema = z
   .object({
@@ -215,9 +231,30 @@ const tokenMeasurementSchema = z
   })
   .strict();
 
-export const canonicalManifestSchema = z
+const legacyCanonicalManifestSchema = z
   .object({
-    formatVersion: z.union([z.literal(1), z.literal(2), z.literal(3)]),
+    formatVersion: z.literal(1),
+    runId: z.string().min(1),
+    createdAt: z.string().datetime(),
+    artifacts: z.array(legacyArtifactManifestSchema),
+    intent: intentClassificationSchema,
+    outcome: z.enum(["green", "red", "unknown"]),
+    evidence: z.array(evidenceSchema),
+    protectedRanges: z.array(protectedRangeSchema),
+    transforms: z.array(legacyPlannedTransformSchema),
+    omissions: z.array(legacyOmissionSchema),
+    outputMappings: z.array(outputMappingSchema),
+    evidenceMappings: z.array(evidenceMappingSchema),
+    compactSha256: sha256Base64UrlSchema,
+    compactByteLength: z.number().int().nonnegative(),
+    originalByteLength: z.number().int().nonnegative(),
+    tokenizer: tokenMeasurementSchema
+  })
+  .strict();
+
+const currentCanonicalManifestSchema = z
+  .object({
+    formatVersion: z.union([z.literal(2), z.literal(3)]),
     runId: z.string().min(1),
     createdAt: z.string().datetime(),
     artifacts: z.array(artifactManifestSchema),
@@ -257,6 +294,11 @@ export const canonicalManifestSchema = z
     tokenizer: tokenMeasurementSchema
   })
   .strict();
+
+export const canonicalManifestSchema = z.union([
+  legacyCanonicalManifestSchema,
+  currentCanonicalManifestSchema
+]);
 
 export const contextReceiptSchema = z
   .object({

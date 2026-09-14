@@ -31,11 +31,15 @@ import {
 } from "../../src/evaluation/external.js";
 import { success } from "../../src/core/result.js";
 
+const executableDigest = canonicalJsonDigest("executable");
+const protocolDigest = canonicalJsonDigest("protocol");
+
 const cases: EvaluationCase[] = Array.from({ length: 3 }, (_, index) => ({
   caseId: `case-${index + 1}`,
   title: `Case ${index + 1}`,
   prompt: "Diagnose",
   artifactPaths: [],
+  artifactIdentities: [],
   expectedEvidenceIds: ["evidence"],
   expectedFailureIds: ["failure"],
   expectedCitations: ["src/a.ts:1"],
@@ -76,8 +80,8 @@ function observation(
     permissions: 0,
     execution: {
       adapterProducerId: plan.settings.adapterId,
-      executableDigest: canonicalJsonDigest("executable"),
-      protocolDigest: canonicalJsonDigest("protocol"),
+      executableDigest: plan.settings.executableDigest,
+      protocolDigest: plan.settings.protocolDigest,
       actualModelId: plan.settings.modelId,
       actualSettingsDigest: canonicalJsonDigest(plan.settings),
       sessionId: `session-${plan.trialId}`,
@@ -94,7 +98,9 @@ describe("paired evaluation harness", () => {
       settings: {
         modelId: "model",
         permissionDigest: canonicalJsonDigest("permissions"),
-        adapterId: "adapter"
+        adapterId: "adapter",
+        executableDigest,
+        protocolDigest
       },
       seed: 42,
       liveOptIn: false
@@ -133,7 +139,9 @@ describe("paired evaluation harness", () => {
       settings: {
         modelId: "model",
         permissionDigest: canonicalJsonDigest("permissions"),
-        adapterId: "adapter"
+        adapterId: "adapter",
+        executableDigest,
+        protocolDigest
       },
       liveOptIn: false,
       createdAt: "2026-01-01T00:00:00.000Z"
@@ -154,7 +162,9 @@ describe("paired evaluation harness", () => {
         modelId: "model",
         reasoningEffort: "medium",
         permissionDigest: canonicalJsonDigest("permissions"),
-        adapterId: "adapter"
+        adapterId: "adapter",
+        executableDigest,
+        protocolDigest
       },
       seed: 123,
       liveOptIn: true,
@@ -218,7 +228,9 @@ describe("paired evaluation harness", () => {
       settings: {
         modelId: "model",
         permissionDigest: canonicalJsonDigest("permissions"),
-        adapterId: "adapter"
+        adapterId: "adapter",
+        executableDigest,
+        protocolDigest
       },
       seed: 7,
       liveOptIn: true,
@@ -262,7 +274,9 @@ describe("paired evaluation harness", () => {
       settings: {
         modelId: "model",
         permissionDigest: canonicalJsonDigest("permissions"),
-        adapterId: "adapter"
+        adapterId: "adapter",
+        executableDigest,
+        protocolDigest
       },
       seed: 1,
       liveOptIn: true
@@ -276,6 +290,20 @@ describe("paired evaluation harness", () => {
       }
     });
     expect(result.ok).toBe(false);
+    const executableMismatch = await runPairedEvaluation({
+      manifest,
+      runner: {
+        run: async (plan) =>
+          success({
+            ...observation(plan),
+            execution: {
+              ...observation(plan).execution,
+              executableDigest: canonicalJsonDigest("different")
+            }
+          })
+      }
+    });
+    expect(executableMismatch.ok).toBe(false);
   });
 
   it("reports when case/trial floors are not met", async () => {
@@ -285,7 +313,9 @@ describe("paired evaluation harness", () => {
       settings: {
         modelId: "model",
         permissionDigest: canonicalJsonDigest("permissions"),
-        adapterId: "adapter"
+        adapterId: "adapter",
+        executableDigest,
+        protocolDigest
       },
       seed: 8,
       liveOptIn: true,
@@ -309,7 +339,9 @@ describe("paired evaluation harness", () => {
       settings: {
         modelId: "model",
         permissionDigest: canonicalJsonDigest("permissions"),
-        adapterId: "adapter"
+        adapterId: "adapter",
+        executableDigest,
+        protocolDigest
       },
       seed: 10,
       liveOptIn: true
@@ -337,6 +369,23 @@ describe("paired evaluation harness", () => {
         modelLatencyMs: Number.NaN
       }).ok
     ).toBe(false);
+    const { plans: _plans, digest: _manifestDigest, ...withoutPlans } =
+      manifest;
+    const missingPlans = {
+      ...withoutPlans,
+      digest: canonicalJsonDigest(withoutPlans)
+    };
+    expect(
+      (
+        await runPairedEvaluation({
+          manifest:
+            missingPlans as unknown as typeof manifest,
+          runner: {
+            run: async (plan) => success(observation(plan))
+          }
+        })
+      ).ok
+    ).toBe(false);
   });
 
   it("loads neutral fixtures and keeps Rohit/Luna adapters external-root only", async () => {
@@ -356,7 +405,8 @@ describe("paired evaluation harness", () => {
           cases: [
             {
               ...cases[0],
-              artifactPaths: ["../ctxo-external-eval-outside/artifact.log"]
+              artifactPaths: ["../ctxo-external-eval-outside/artifact.log"],
+              artifactIdentities: []
             }
           ]
         }),
@@ -364,6 +414,26 @@ describe("paired evaluation harness", () => {
       );
       const external = new ExternalLocalFixtureAdapter(directory);
       expect(external.loadCases("manifest.json").ok).toBe(false);
+
+      const localArtifact = join(directory, "artifact.log");
+      writeFileSync(localArtifact, "bound artifact", "utf8");
+      writeFileSync(
+        join(directory, "bound.json"),
+        JSON.stringify({
+          cases: [
+            {
+              ...cases[0],
+              artifactPaths: ["artifact.log"],
+              artifactIdentities: undefined,
+              source: "external"
+            }
+          ]
+        }),
+        "utf8"
+      );
+      const bound = external.loadCases("bound.json");
+      expect(bound.ok).toBe(true);
+      if (!bound.ok) return;
 
       const input = {
         externalRoot: directory,
@@ -378,6 +448,13 @@ describe("paired evaluation harness", () => {
         "rohit.mf"
       );
       expect(createLunaAdapter(input).metadata.producerId).toContain("luna");
+      expect(cqAdapter.verifyArtifacts(bound.value[0] as EvaluationCase).ok).toBe(
+        true
+      );
+      writeFileSync(localArtifact, "mutated artifact", "utf8");
+      expect(cqAdapter.verifyArtifacts(bound.value[0] as EvaluationCase).ok).toBe(
+        false
+      );
       expect(
         (
           await cqAdapter.run({
@@ -387,7 +464,9 @@ describe("paired evaluation harness", () => {
               settings: {
                 modelId: "model",
                 permissionDigest: canonicalJsonDigest("permissions"),
-                adapterId: cqAdapter.metadata.producerId
+                adapterId: cqAdapter.metadata.producerId,
+                executableDigest: cqAdapter.executableDigest,
+                protocolDigest: cqAdapter.protocolDigest
               },
               seed: 1,
               liveOptIn: true,

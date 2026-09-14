@@ -2,11 +2,18 @@ import type { ProducerMetadata } from "./providers.js";
 
 export type EvaluationArm = "original" | "prepared" | "truncation";
 
+export interface EvaluationArtifactIdentity {
+  readonly path: string;
+  readonly sha256: string;
+  readonly byteLength: number;
+}
+
 export interface EvaluationCase {
   readonly caseId: string;
   readonly title: string;
   readonly prompt: string;
   readonly artifactPaths: readonly string[];
+  readonly artifactIdentities: readonly EvaluationArtifactIdentity[];
   readonly expectedEvidenceIds: readonly string[];
   readonly expectedFailureIds: readonly string[];
   readonly expectedCitations: readonly string[];
@@ -20,6 +27,8 @@ export interface EvaluationRunSettings {
   readonly contextTier?: string;
   readonly permissionDigest: string;
   readonly adapterId: string;
+  readonly executableDigest: string;
+  readonly protocolDigest: string;
 }
 
 export interface EvaluationTrialPlan {

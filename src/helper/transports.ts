@@ -7,6 +7,9 @@ import {
   validateExternalSendAuthorization
 } from "../security/security.js";
 import { lookup } from "node:dns/promises";
+import { mkdirSync, rmSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { resolve } from "node:path";
 
 function isLoopbackAddress(address: string): boolean {
   return (
@@ -39,12 +42,22 @@ export interface HostedHelperSession {
 }
 
 export interface HostedHelperClient {
+  readonly configurationDigest: string;
   start(): Promise<void>;
   createSession(config: Readonly<Record<string, unknown>>): Promise<HostedHelperSession>;
   stop(): Promise<Error[]>;
 }
 
-export type HostedHelperClientFactory = () => Promise<HostedHelperClient>;
+export interface HostedHelperClientConfiguration {
+  readonly mode: "empty";
+  readonly workingDirectory: string;
+  readonly baseDirectory: string;
+  readonly useLoggedInUser: true;
+}
+
+export type HostedHelperClientFactory = (
+  configuration: HostedHelperClientConfiguration
+) => Promise<HostedHelperClient>;
 
 export class HostedCopilotHelperTransport implements IsolatedHelperTransport {
   readonly metadata = metadata(
@@ -73,23 +86,43 @@ export class HostedCopilotHelperTransport implements IsolatedHelperTransport {
       assessedSource: security.assessedSource
     });
     if (!authorized.ok) throw new Error(authorized.error.message);
-    const client = await this.#factory();
-    await client.start();
-    const session = await client.createSession({
-      clientName: "context-overflow-helper",
-      availableTools: [],
-      tools: [],
-      includedBuiltinSkills: [],
-      installedPlugins: [],
-      systemMessage: {
-        mode: "append",
-        content:
-          "Return only the requested JSON evidence-gap suggestions. Do not use tools or files."
-      }
-    });
+    const baseDirectory = resolve(
+      ".context-overflow",
+      "helper",
+      randomUUID()
+    );
+    mkdirSync(baseDirectory, { recursive: true });
+    const configuration: HostedHelperClientConfiguration = {
+      mode: "empty",
+      workingDirectory: baseDirectory,
+      baseDirectory,
+      useLoggedInUser: true
+    };
+    const configurationDigest = canonicalJsonDigest(configuration);
+    let client: HostedHelperClient | undefined;
+    let session: HostedHelperSession | undefined;
     let timer: NodeJS.Timeout | undefined;
     let timedOut = false;
     try {
+      client = await this.#factory(configuration);
+      if (client.configurationDigest !== configurationDigest) {
+        throw new Error(
+          "Hosted helper client did not attest the required empty-mode configuration"
+        );
+      }
+      await client.start();
+      session = await client.createSession({
+        clientName: "context-overflow-helper",
+        availableTools: [],
+        tools: [],
+        includedBuiltinSkills: [],
+        installedPlugins: [],
+        systemMessage: {
+          mode: "append",
+          content:
+            "Return only the requested JSON evidence-gap suggestions. Do not use tools or files."
+        }
+      });
       const timeout = new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
           timedOut = true;
@@ -102,12 +135,13 @@ export class HostedCopilotHelperTransport implements IsolatedHelperTransport {
       ]);
       return response?.data?.content ?? "";
     } catch (error) {
-      if (timedOut) await session.abort();
+      if (timedOut && session !== undefined) await session.abort();
       throw error;
     } finally {
       if (timer !== undefined) clearTimeout(timer);
-      await session.disconnect();
-      await client.stop();
+      if (session !== undefined) await session.disconnect();
+      if (client !== undefined) await client.stop();
+      rmSync(baseDirectory, { recursive: true, force: true });
     }
   }
 }

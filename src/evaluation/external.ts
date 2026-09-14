@@ -43,9 +43,19 @@ function inside(root: string, path: string): boolean {
 
 export class ExternalLocalFixtureAdapter {
   readonly root: string;
+  readonly #maxArtifactBytes: number;
+  readonly #maxTotalBytes: number;
 
-  constructor(root: string) {
+  constructor(
+    root: string,
+    limits: {
+      readonly maxArtifactBytes?: number;
+      readonly maxTotalBytes?: number;
+    } = {}
+  ) {
     this.root = realpathSync(resolve(root));
+    this.#maxArtifactBytes = limits.maxArtifactBytes ?? 8 * 1024 * 1024;
+    this.#maxTotalBytes = limits.maxTotalBytes ?? 32 * 1024 * 1024;
   }
 
   loadCases(manifestPath: string): Result<readonly EvaluationCase[]> {
@@ -57,19 +67,39 @@ export class ExternalLocalFixtureAdapter {
       const parsed = JSON.parse(readFileSync(path, "utf8")) as {
         cases?: unknown;
       };
-      const cases = validateEvaluationCases(parsed.cases);
+      const cases = validateEvaluationCases(parsed.cases, true);
       if (!cases.ok) {
         return failure("INVALID_ARGUMENT", "External fixture manifest has no cases");
       }
+      const enriched: EvaluationCase[] = [];
+      let totalBytes = 0;
       for (const testCase of cases.value) {
+        const artifactIdentities = [];
         for (const artifactPath of testCase.artifactPaths) {
           const artifact = realpathSync(resolve(this.root, artifactPath));
           if (!inside(this.root, artifact)) {
             return failure("INVALID_ARGUMENT", "Fixture artifact escapes external root");
           }
+          const bytes = readFileSync(artifact);
+          totalBytes += bytes.length;
+          if (
+            bytes.length > this.#maxArtifactBytes ||
+            totalBytes > this.#maxTotalBytes
+          ) {
+            return failure(
+              "LIMIT_EXCEEDED",
+              "External fixture artifacts exceed configured limits"
+            );
+          }
+          artifactIdentities.push({
+            path: artifactPath,
+            sha256: sha256Base64Url(bytes),
+            byteLength: bytes.length
+          });
         }
+        enriched.push({ ...testCase, artifactIdentities });
       }
-      return success(cases.value);
+      return success(enriched);
     } catch (error) {
       return failure("IO_ERROR", "Unable to load external fixture manifest", {
         cause: error instanceof Error ? error.message : String(error)
@@ -92,8 +122,8 @@ export class ExternalJsonContractAdapter
   readonly #dangerousOptIn: boolean;
   readonly #timeoutMs: number;
   readonly #maxOutputBytes: number;
-  readonly #executableDigest: string;
-  readonly #protocolDigest: string;
+  readonly executableDigest: string;
+  readonly protocolDigest: string;
 
   constructor(input: {
     readonly adapterId: string;
@@ -111,8 +141,8 @@ export class ExternalJsonContractAdapter
     this.#dangerousOptIn = input.dangerousOptIn === true;
     this.#timeoutMs = input.timeoutMs ?? 60_000;
     this.#maxOutputBytes = input.maxOutputBytes ?? 1024 * 1024;
-    this.#executableDigest = sha256Base64Url(readFileSync(this.#command));
-    this.#protocolDigest = canonicalJsonDigest({
+    this.executableDigest = sha256Base64Url(readFileSync(this.#command));
+    this.protocolDigest = canonicalJsonDigest({
       protocol: "ctxo-evaluation-json-stdin-stdout",
       version: 1,
       adapterId: input.adapterId
@@ -127,6 +157,27 @@ export class ExternalJsonContractAdapter
       return failure(
         "INVALID_ARGUMENT",
         "Arbitrary external command adapters are disabled by default; explicit dangerousOptIn is required"
+      );
+    }
+    if (
+      input.plan.settings.adapterId !== this.metadata.producerId ||
+      input.plan.settings.executableDigest !== this.executableDigest ||
+      input.plan.settings.protocolDigest !== this.protocolDigest
+    ) {
+      return failure(
+        "INTEGRITY_ERROR",
+        "Evaluation plan is not bound to this adapter executable"
+      );
+    }
+    const artifacts = this.verifyArtifacts(input.testCase);
+    if (!artifacts.ok) return artifacts;
+    if (
+      sha256Base64Url(readFileSync(this.#command)) !==
+      this.executableDigest
+    ) {
+      return failure(
+        "INTEGRITY_ERROR",
+        "External evaluation executable changed after approval"
       );
     }
     return new Promise((resolveResult) => {
@@ -207,8 +258,8 @@ export class ExternalJsonContractAdapter
               execution: {
                 ...parsed.value.execution,
                 adapterProducerId: this.metadata.producerId,
-                executableDigest: this.#executableDigest,
-                protocolDigest: this.#protocolDigest
+                executableDigest: this.executableDigest,
+                protocolDigest: this.protocolDigest
               }
             })
           );
@@ -224,6 +275,52 @@ export class ExternalJsonContractAdapter
       });
       child.stdin.end(JSON.stringify(input));
     });
+  }
+
+  verifyArtifacts(testCase: EvaluationCase): Result<void> {
+    try {
+      if (
+        testCase.artifactIdentities.length !==
+        testCase.artifactPaths.length
+      ) {
+        return failure(
+          "INTEGRITY_ERROR",
+          "Evaluation artifact identities are incomplete"
+        );
+      }
+      for (const identity of testCase.artifactIdentities) {
+        const artifact = realpathSync(
+          resolve(this.#root, identity.path)
+        );
+        if (!inside(this.#root, artifact)) {
+          return failure(
+            "INTEGRITY_ERROR",
+            "Evaluation artifact escapes external root"
+          );
+        }
+        const bytes = readFileSync(artifact);
+        if (
+          bytes.length !== identity.byteLength ||
+          sha256Base64Url(bytes) !== identity.sha256
+        ) {
+          return failure(
+            "INTEGRITY_ERROR",
+            "Evaluation artifact changed after manifest creation"
+          );
+        }
+      }
+      return success(undefined);
+    } catch (error) {
+      return failure(
+        "IO_ERROR",
+        "Unable to verify evaluation artifacts",
+        {
+          errorDigest: canonicalJsonDigest(
+            error instanceof Error ? error.message : String(error)
+          )
+        }
+      );
+    }
   }
 }
 

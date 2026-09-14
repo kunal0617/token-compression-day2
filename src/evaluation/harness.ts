@@ -13,6 +13,9 @@ import { deterministicUuid } from "../core/hash.js";
 import { failure, success, type Result } from "../core/result.js";
 
 export interface EvaluationArmRunner {
+  verifyArtifacts?(
+    testCase: EvaluationCase
+  ): Promise<Result<void>> | Result<void>;
   run(
     plan: EvaluationTrialPlan,
     testCase: EvaluationCase
@@ -44,7 +47,8 @@ function producer(): ProducerMetadata {
 }
 
 export function validateEvaluationCases(
-  value: unknown
+  value: unknown,
+  allowUnboundArtifacts = false
 ): Result<readonly EvaluationCase[]> {
   if (!Array.isArray(value)) {
     return failure("INTEGRITY_ERROR", "Evaluation cases are not an array");
@@ -77,7 +81,21 @@ export function validateEvaluationCases(
             items.some((item) => typeof item !== "string") ||
             new Set(items).size !== items.length
           );
-        })
+        }) ||
+        (!allowUnboundArtifacts &&
+          !Array.isArray(testCase.artifactIdentities)) ||
+        (Array.isArray(testCase.artifactIdentities) &&
+          (testCase.artifactIdentities.length !==
+            testCase.artifactPaths?.length ||
+          testCase.artifactIdentities.some(
+          (artifact, index) =>
+            artifact === null ||
+            typeof artifact !== "object" ||
+            artifact.path !== testCase.artifactPaths?.[index] ||
+            !Number.isSafeInteger(artifact.byteLength) ||
+            artifact.byteLength < 0 ||
+            !/^[A-Za-z0-9_-]{43}$/.test(artifact.sha256)
+          )))
     )
   ) {
     return failure(
@@ -89,13 +107,48 @@ export function validateEvaluationCases(
 }
 
 export function validateReplayManifest(
-  manifest: EvaluationReplayManifest
+  value: unknown
 ): Result<void> {
+  if (
+    value === null ||
+    typeof value !== "object" ||
+    !Array.isArray(
+      (value as Partial<EvaluationReplayManifest>).cases
+    ) ||
+    !Array.isArray(
+      (value as Partial<EvaluationReplayManifest>).plans
+    )
+  ) {
+    return failure(
+      "INTEGRITY_ERROR",
+      "Replay manifest top-level contract is invalid"
+    );
+  }
+  const manifest = value as EvaluationReplayManifest;
   const { digest, ...unsigned } = manifest;
+  let expectedDigest: string;
+  try {
+    expectedDigest = canonicalJsonDigest(unsigned);
+  } catch {
+    return failure(
+      "INTEGRITY_ERROR",
+      "Replay manifest cannot be canonicalized"
+    );
+  }
   const cases = validateEvaluationCases(manifest.cases);
+  let producerMatches = false;
+  try {
+    producerMatches =
+      manifest.producer !== null &&
+      typeof manifest.producer === "object" &&
+      canonicalJsonDigest(manifest.producer) ===
+        canonicalJsonDigest(producer());
+  } catch {
+    producerMatches = false;
+  }
   if (
     !cases.ok ||
-    digest !== canonicalJsonDigest(unsigned) ||
+    digest !== expectedDigest ||
     manifest.formatVersion !== 1 ||
     typeof manifest.suiteId !== "string" ||
     manifest.suiteId.length === 0 ||
@@ -103,8 +156,7 @@ export function validateReplayManifest(
     !Number.isFinite(Date.parse(manifest.createdAt)) ||
     !Number.isInteger(manifest.trialsPerArm) ||
     manifest.trialsPerArm <= 0 ||
-    canonicalJsonDigest(manifest.producer) !==
-      canonicalJsonDigest(producer())
+    !producerMatches
   ) {
     return failure(
       "INTEGRITY_ERROR",
@@ -112,6 +164,41 @@ export function validateReplayManifest(
     );
   }
   const caseIds = new Set(manifest.cases.map((item) => item.caseId));
+  if (
+    manifest.plans.some(
+      (plan) =>
+        plan === null ||
+        typeof plan !== "object" ||
+        plan.settings === undefined ||
+        typeof plan.settings !== "object" ||
+        typeof plan.trialId !== "string" ||
+        plan.trialId.length === 0 ||
+        typeof plan.caseId !== "string" ||
+        !Number.isSafeInteger(plan.trialNumber) ||
+        !["original", "prepared", "truncation"].includes(plan.arm) ||
+        typeof plan.settings.modelId !== "string" ||
+        plan.settings.modelId.length === 0 ||
+        typeof plan.settings.permissionDigest !== "string" ||
+        plan.settings.permissionDigest.length === 0 ||
+        typeof plan.settings.adapterId !== "string" ||
+        plan.settings.adapterId.length === 0 ||
+        !/^[A-Za-z0-9_-]{43}$/.test(
+          plan.settings.executableDigest
+        ) ||
+        !/^[A-Za-z0-9_-]{43}$/.test(
+          plan.settings.protocolDigest
+        ) ||
+        !/^[A-Za-z0-9_-]{43}$/.test(plan.sessionConstraintDigest) ||
+        !caseIds.has(plan.caseId) ||
+        plan.trialNumber < 1 ||
+        plan.trialNumber > manifest.trialsPerArm
+    )
+  ) {
+    return failure(
+      "INTEGRITY_ERROR",
+      "Replay plan references invalid case or trial"
+    );
+  }
   const trialIds = new Set(manifest.plans.map((item) => item.trialId));
   if (
     caseIds.size !== manifest.cases.length ||
@@ -149,30 +236,6 @@ export function validateReplayManifest(
         );
       }
     }
-  }
-  if (
-    manifest.plans.some(
-      (plan) =>
-        plan.settings === undefined ||
-        typeof plan.settings !== "object" ||
-        typeof plan.trialId !== "string" ||
-        plan.trialId.length === 0 ||
-        typeof plan.caseId !== "string" ||
-        !Number.isSafeInteger(plan.trialNumber) ||
-        !["original", "prepared", "truncation"].includes(plan.arm) ||
-        typeof plan.settings.modelId !== "string" ||
-        plan.settings.modelId.length === 0 ||
-        typeof plan.settings.permissionDigest !== "string" ||
-        plan.settings.permissionDigest.length === 0 ||
-        typeof plan.settings.adapterId !== "string" ||
-        plan.settings.adapterId.length === 0 ||
-        !/^[A-Za-z0-9_-]{43}$/.test(plan.sessionConstraintDigest) ||
-        !caseIds.has(plan.caseId) ||
-        plan.trialNumber < 1 ||
-        plan.trialNumber > manifest.trialsPerArm
-    )
-  ) {
-    return failure("INTEGRITY_ERROR", "Replay plan references invalid case or trial");
   }
   return success(undefined);
 }
@@ -475,6 +538,17 @@ export async function runPairedEvaluation(input: {
     if (testCase === undefined) {
       return failure("INTEGRITY_ERROR", "Replay plan references unknown case");
     }
+    if (testCase.artifactIdentities.length > 0) {
+      if (input.runner.verifyArtifacts === undefined) {
+        return failure(
+          "INTEGRITY_ERROR",
+          "Evaluation runner cannot verify bound artifacts"
+        );
+      }
+      const verifiedArtifacts =
+        await input.runner.verifyArtifacts(testCase);
+      if (!verifiedArtifacts.ok) return verifiedArtifacts;
+    }
     const observation = await input.runner.run(plan, testCase);
     if (!observation.ok) return observation;
     const parsedObservation = parseEvaluationObservation(observation.value);
@@ -495,12 +569,10 @@ export async function runPairedEvaluation(input: {
       parsedObservation.value.execution.actualSettingsDigest !==
         canonicalJsonDigest(plan.settings) ||
       parsedObservation.value.execution.newSession !== true ||
-      !/^[A-Za-z0-9_-]{43}$/.test(
-        parsedObservation.value.execution.executableDigest
-      ) ||
-      !/^[A-Za-z0-9_-]{43}$/.test(
-        parsedObservation.value.execution.protocolDigest
-      ) ||
+      parsedObservation.value.execution.executableDigest !==
+        plan.settings.executableDigest ||
+      parsedObservation.value.execution.protocolDigest !==
+        plan.settings.protocolDigest ||
       sessionIds.has(parsedObservation.value.execution.sessionId)
     ) {
       return failure(
@@ -607,12 +679,10 @@ export async function runPairedEvaluation(input: {
       parsed.value.execution.actualModelId !== plan.settings.modelId ||
       parsed.value.execution.actualSettingsDigest !==
         canonicalJsonDigest(plan.settings) ||
-      !/^[A-Za-z0-9_-]{43}$/.test(
-        parsed.value.execution.executableDigest
-      ) ||
-      !/^[A-Za-z0-9_-]{43}$/.test(
-        parsed.value.execution.protocolDigest
-      ) ||
+      parsed.value.execution.executableDigest !==
+        plan.settings.executableDigest ||
+      parsed.value.execution.protocolDigest !==
+        plan.settings.protocolDigest ||
       aaSessionIds.has(parsed.value.execution.sessionId)
     ) {
       return failure(

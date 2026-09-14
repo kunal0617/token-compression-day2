@@ -226,6 +226,21 @@ permission. Secret-bearing payloads require a reviewed, source-linked redacted
 view with random or keyed-HMAC placeholders; unsalted secret hashes are never
 used. Indirect prompt injection is not automatically redacted.
 
+## Paired evaluation
+
+The opt-in harness builds versioned A1/A2/A3 original and B1/B2/B3 prepared
+trials with matched model/settings/session constraints; an optional matched
+truncation arm is available. It scores task success, visible/recoverable
+evidence, distinct failures, citations, unsupported claims, contradictions,
+abstention, retrieval, latency, decisions, tools, and permissions.
+
+Reports include canonical JSON, Markdown, CSV, replay manifests, A/A noise,
+paired discordance, deterministic seeded bootstrap bounds, effect size, and
+reporting floors. External Rohit CQ/MF and Luna adapters execute only inside an
+explicit external root and never vendor private fixtures. See the
+[evaluation method](docs/evaluation-method.md) and
+[external fixture instructions](docs/external-fixtures.md).
+
 For CI summary logs, routine path/version/timestamp/identifier occurrences stay
 in the manifest but do not automatically protect neighboring lines. Source
 locations require credible file extensions or diagnostic/stack/compiler

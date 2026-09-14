@@ -43,6 +43,7 @@ hashes, slicing, mappings, retrieval, and reconstruction use original bytes.
 | `model` | MF-01/02/03 hard filters, versioned curated eligibility, deterministic scoring, and new-session advice | Pure provider |
 | `helper` | Optional additive-only gap/query suggestions with strict schemas, budgets, isolation, and no-op failures | Isolated transport adapters |
 | `security` | Trust classes, local secret/injection assessment, shareable redaction, and external-send authorization | Pure policy + crypto |
+| `evaluation` | Opt-in matched A/B trials, replay manifests, scoring, statistics, reports, and external adapters | Evaluation ports + process adapter |
 | `segment` / `protect` | Structural lines and protected closure | Pure |
 | `reduce` | Proposals, benefit checks, and overlap resolution | Pure |
 | `render` | One compact render and mapping creation | Pure |

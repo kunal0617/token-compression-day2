@@ -56,6 +56,7 @@ import { optionalCopilotSdkAdapter } from "../adapters/copilot-sdk.js";
 import { deterministicModelFitAdviser } from "../model/advice.js";
 import { isolatedGapSuggestionProducer } from "../helper/isolation.js";
 import { securityAssessmentProducer } from "../security/security.js";
+import { evaluationHarnessProducer } from "../evaluation/harness.js";
 import { segmentArtifact } from "../segment/segment.js";
 import { VersionedRegistry } from "./registry.js";
 import {
@@ -272,6 +273,7 @@ export function createBuiltinRuntime(): BuiltinRuntime {
     | typeof deterministicModelFitAdviser
     | typeof isolatedGapSuggestionProducer
     | typeof securityAssessmentProducer
+    | typeof evaluationHarnessProducer
   >();
   const preparation = [
     artifactClassifier,
@@ -313,6 +315,8 @@ export function createBuiltinRuntime(): BuiltinRuntime {
     isolatedGapSuggestionProducer
     ,
     securityAssessmentProducer
+    ,
+    evaluationHarnessProducer
   ]) {
     const registered = registry.register(producer);
     if (!registered.ok) throw new Error(registered.error.message);

@@ -81,6 +81,7 @@ describe("CQ-02 typed failure parsers", () => {
       message: "outer failure",
       code: "ERR_OUTER"
     });
+
     expect(exception?.frames[0]?.location).toEqual({
       path: "src/app.ts",
       line: 20,
@@ -93,6 +94,27 @@ describe("CQ-02 typed failure parsers", () => {
     expect(exception?.causes[0]?.frames[0]?.location.path).toBe(
       "src/input.ts"
     );
+  });
+
+  it("retains inline assertion expected and actual values", () => {
+    const input = artifact(
+      [
+        "FAIL tests/value.test.ts > values > compares",
+        'AssertionError: Expected "received" to be "expected"',
+        "  at tests/value.test.ts:4:5",
+        "Process exited with code 1",
+        ""
+      ].join("\n")
+    );
+    const result = vitestJestFailureDetector.detect({
+      artifact: input
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.findings[0]?.tests[0]).toMatchObject({
+      actual: '"received"',
+      expected: '"expected"'
+    });
   });
 
   it("uses an explicit conservative fallback without claiming recognition", () => {

@@ -286,10 +286,18 @@ byte-identical reconstruction.
 npm run check
 npm run check:full-capability
 npm run test:parity
+npm run parity:external -- --root <external-manual-root>
 npm run demo:day0-5
 npm run test:unit
 npm run test:integration
 ```
+
+`parity:external` uses a subprocess-free, read-only adapter for the known
+manual CQ/MF/Luna fixture layout. It confines direct reads beneath the
+realpath-resolved root, applies byte/time limits, writes only a digest/metrics
+report under ignored `.context-overflow/`, and never copies fixture content
+into the repository. Luna live execution remains explicitly not applicable in
+this read-only comparison.
 
 The tests cover byte indexing and encodings, classifier conflicts, protected
 duplicates, exact and template reductions, strict handles, committed visibility,

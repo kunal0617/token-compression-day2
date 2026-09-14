@@ -183,6 +183,10 @@ export class VitestJestFailureDetector
       const expected = /^\s*Expected:\s*([\s\S]+)$/i.exec(text)?.[1];
       const actual =
         /^\s*(?:Received|Actual):\s*([\s\S]+)$/i.exec(text)?.[1];
+      const inlineValues =
+        /\bExpected\s+(.+?)\s+to\s+(?:be|equal|match)\s+(.+)$/i.exec(
+          text
+        );
       if (currentTest !== undefined && expected !== undefined) {
         currentTest = {
           ...currentTest,
@@ -195,6 +199,19 @@ export class VitestJestFailureDetector
         currentTest = {
           ...currentTest,
           actual,
+          endByte: range.endByte
+        };
+        tests[tests.length - 1] = currentTest;
+      }
+      if (
+        currentTest !== undefined &&
+        inlineValues?.[1] !== undefined &&
+        inlineValues[2] !== undefined
+      ) {
+        currentTest = {
+          ...currentTest,
+          actual: inlineValues[1],
+          expected: inlineValues[2],
           endByte: range.endByte
         };
         tests[tests.length - 1] = currentTest;

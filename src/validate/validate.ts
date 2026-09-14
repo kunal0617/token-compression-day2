@@ -18,6 +18,7 @@ import { assertRange, rangesIntersect } from "../core/ranges.js";
 import { failure, success, type Result } from "../core/result.js";
 import { extractEvidence } from "../evidence/extract.js";
 import { buildProtectedRanges } from "../protect/protect.js";
+import { buildReceipt } from "../receipt/receipt.js";
 import { planTransforms } from "../reduce/planner.js";
 import { proposeTransforms } from "../reduce/propose.js";
 import { renderContext } from "../render/render.js";
@@ -182,7 +183,10 @@ export function validateContextPackage(input: {
   const artifactsById = new Map(
     artifacts.map((artifact) => [artifact.artifactId, artifact])
   );
-  if (artifactsById.size !== artifacts.length) {
+  if (
+    artifactsById.size !== artifacts.length ||
+    artifacts.length !== manifest.artifacts.length
+  ) {
     return failure("INTEGRITY_ERROR", "Artifact IDs are not unique");
   }
   for (const artifactManifest of manifest.artifacts) {
@@ -191,6 +195,16 @@ export function validateContextPackage(input: {
       artifact === undefined ||
       artifact.byteLength !== artifactManifest.byteLength ||
       artifact.sha256 !== artifactManifest.sha256 ||
+      artifact.ordinal !== artifactManifest.ordinal ||
+      artifact.role !== artifactManifest.role ||
+      canonicalJson(artifact.source) !==
+        canonicalJson(artifactManifest.source) ||
+      artifact.utf8 !== artifactManifest.utf8 ||
+      artifact.hasBom !== artifactManifest.hasBom ||
+      artifact.newlineStyle !== artifactManifest.newlineStyle ||
+      artifact.hasAnsi !== artifactManifest.hasAnsi ||
+      artifact.completeness !== artifactManifest.completeness ||
+      artifact.completenessReason !== artifactManifest.completenessReason ||
       sha256Base64Url(artifact.bytes) !== artifactManifest.sha256
     ) {
       return failure(
@@ -795,6 +809,28 @@ export function verifyStoredRun(
     artifactBytes.value
   );
   if (!snapshotsResult.ok) return snapshotsResult;
+  const receipt = store.inspectReceipt(runId);
+  if (!receipt.ok) return receipt;
+  const expectedReceipt = buildReceipt({
+    runId,
+    classifications: storedManifest.value.manifest.artifacts.map(
+      (artifact) => artifact.classification
+    ),
+    intent: storedManifest.value.manifest.intent,
+    outcome: storedManifest.value.manifest.outcome,
+    originalBytes: storedManifest.value.manifest.originalByteLength,
+    preparedBytes: storedManifest.value.manifest.compactByteLength,
+    tokens: storedManifest.value.manifest.tokenizer,
+    evidence: storedManifest.value.manifest.evidence,
+    omissions: storedManifest.value.manifest.omissions,
+    warnings: receipt.value.warnings
+  });
+  if (canonicalJson(expectedReceipt) !== canonicalJson(receipt.value)) {
+    return failure(
+      "INTEGRITY_ERROR",
+      "Stored receipt does not match the committed manifest"
+    );
+  }
   const validated = validateContextPackage({
     contextPackage: {
       runId,

@@ -14,7 +14,7 @@ const byteRangeSchema = z
     message: "endByte must be greater than or equal to startByte"
   });
 
-const artifactSourceSchema = z
+export const artifactSourceSchema = z
   .object({
     kind: z.enum(["file", "pasted"]),
     label: z.string().min(1),

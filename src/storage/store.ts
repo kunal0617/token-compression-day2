@@ -3,6 +3,7 @@ import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import {
+  artifactSourceSchema,
   canonicalManifestSchema,
   contextReceiptSchema
 } from "../contracts/schemas.js";
@@ -52,6 +53,7 @@ interface RunRow {
   readonly manifest_hash: string | null;
   readonly compact_hash: string | null;
   readonly receipt_json: string | null;
+  readonly receipt_hash: string | null;
 }
 
 interface ManifestRow {
@@ -63,6 +65,23 @@ interface ManifestRow {
 
 interface ArtifactBlobRow {
   readonly artifact_id: string;
+  readonly bytes: Uint8Array;
+}
+
+interface StagingArtifactRow {
+  readonly artifact_id: string;
+  readonly ordinal: number;
+  readonly role: string;
+  readonly source_json: string;
+  readonly digest: string;
+  readonly byte_length: number;
+  readonly utf8: string;
+  readonly has_bom: number;
+  readonly newline_style: string;
+  readonly has_ansi: number;
+  readonly completeness: string;
+  readonly completeness_reason: string;
+  readonly blob_size: number;
   readonly bytes: Uint8Array;
 }
 
@@ -125,6 +144,7 @@ export class ContextStore {
         original_tokens INTEGER NOT NULL,
         prepared_tokens INTEGER NOT NULL,
         receipt_json TEXT,
+        receipt_hash TEXT,
         error TEXT
       ) STRICT;
 
@@ -228,6 +248,50 @@ export class ContextStore {
         FOREIGN KEY(run_id) REFERENCES runs(run_id) ON DELETE CASCADE
       ) STRICT;
     `);
+    const runColumns = this.#database
+      .prepare("PRAGMA table_info(runs)")
+      .all() as unknown as { name: string }[];
+    if (!runColumns.some((column) => column.name === "receipt_hash")) {
+      this.#database.exec("ALTER TABLE runs ADD COLUMN receipt_hash TEXT");
+    }
+    this.#backfillReceiptHashes();
+  }
+
+  #backfillReceiptHashes(): void {
+    this.#database.exec("BEGIN IMMEDIATE");
+    try {
+      const rows = this.#database
+        .prepare(
+          `SELECT run_id, receipt_json
+           FROM runs
+           WHERE status='committed' AND validation_status='validated'
+             AND receipt_json IS NOT NULL AND receipt_hash IS NULL`
+        )
+        .all() as unknown as { run_id: string; receipt_json: string }[];
+      for (const row of rows) {
+        const parsedJson: unknown = JSON.parse(row.receipt_json);
+        const parsed = contextReceiptSchema.safeParse(parsedJson);
+        if (
+          !parsed.success ||
+          parsed.data.runId !== row.run_id ||
+          canonicalJson(parsed.data) !== row.receipt_json
+        ) {
+          throw new Error(
+            `Historical receipt cannot be safely backfilled for run ${row.run_id}`
+          );
+        }
+        this.#database
+          .prepare("UPDATE runs SET receipt_hash=? WHERE run_id=?")
+          .run(
+            sha256Base64Url(Buffer.from(row.receipt_json, "utf8")),
+            row.run_id
+          );
+      }
+      this.#database.exec("COMMIT");
+    } catch (error) {
+      this.#database.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   #putBlob(digest: string, bytes: Buffer): void {
@@ -749,6 +813,90 @@ export class ContextStore {
     }
   }
 
+  #loadStagingArtifacts(runId: string): Result<readonly ArtifactSnapshot[]> {
+      try {
+        const rows = this.#database
+          .prepare(
+            `SELECT
+               a.artifact_id, a.ordinal, a.role, a.source_json, a.digest,
+               a.byte_length, a.utf8, a.has_bom, a.newline_style, a.has_ansi,
+               a.completeness, a.completeness_reason,
+               b.size AS blob_size, b.bytes
+             FROM artifacts a
+             JOIN blobs b ON b.digest = a.digest
+             JOIN runs r ON r.run_id = a.run_id
+             WHERE a.run_id=? AND r.status='staging'
+               AND r.validation_status='pending'
+             ORDER BY a.ordinal`
+          )
+          .all(runId) as unknown as StagingArtifactRow[];
+        const artifacts: ArtifactSnapshot[] = [];
+        for (const row of rows) {
+          const parsedSource = artifactSourceSchema.safeParse(
+            JSON.parse(row.source_json) as unknown
+          );
+          if (
+            !parsedSource.success ||
+            !["prompt", "context"].includes(row.role) ||
+            !["valid", "invalid"].includes(row.utf8) ||
+            !["none", "lf", "crlf", "cr", "mixed"].includes(
+              row.newline_style
+            ) ||
+            !["complete", "truncated", "unknown"].includes(row.completeness)
+          ) {
+            return failure(
+              "INTEGRITY_ERROR",
+              "Staged artifact metadata is invalid",
+              { runId, artifactId: row.artifact_id }
+            );
+          }
+          const bytes = Buffer.from(row.bytes);
+          if (
+            bytes.length !== row.blob_size ||
+            row.byte_length !== row.blob_size ||
+            sha256Base64Url(bytes) !== row.digest
+          ) {
+            return failure(
+              "INTEGRITY_ERROR",
+              "Staged artifact blob failed digest or size validation",
+              { runId, artifactId: row.artifact_id }
+            );
+          }
+          const source = {
+            kind: parsedSource.data.kind,
+            label: parsedSource.data.label,
+            ...(parsedSource.data.requestedPath === undefined
+              ? {}
+              : { requestedPath: parsedSource.data.requestedPath }),
+            ...(parsedSource.data.canonicalPath === undefined
+              ? {}
+              : { canonicalPath: parsedSource.data.canonicalPath })
+          };
+          artifacts.push({
+            artifactId: row.artifact_id,
+            ordinal: row.ordinal,
+            role: row.role as "prompt" | "context",
+            source,
+            bytes,
+            byteLength: row.byte_length,
+            sha256: row.digest,
+            utf8: row.utf8 as "valid" | "invalid",
+            hasBom: row.has_bom === 1,
+            newlineStyle: row.newline_style as ArtifactSnapshot["newlineStyle"],
+            hasAnsi: row.has_ansi === 1,
+            completeness: row.completeness as ArtifactSnapshot["completeness"],
+            completenessReason: row.completeness_reason
+          });
+        }
+        return success(artifacts);
+      } catch (error) {
+        return failure("STORAGE_ERROR", "Unable to load staged artifacts", {
+          runId,
+          cause: errorMessage(error)
+        });
+      }
+  }
+
   beginValidation(runId: string): Result<void> {
     if (this.#validationRunId !== undefined) {
       return failure("STORAGE_ERROR", "A validation transaction is already active", {
@@ -794,10 +942,15 @@ export class ContextStore {
         .prepare(
           `UPDATE runs
            SET status='committed', validation_status='validated',
-               committed_at=?, receipt_json=?
+               committed_at=?, receipt_json=?, receipt_hash=?
            WHERE run_id=? AND status='staging' AND validation_status='pending'`
         )
-        .run(new Date().toISOString(), canonicalJson(receipt), runId);
+        .run(
+          new Date().toISOString(),
+          canonicalJson(receipt),
+          sha256Base64Url(Buffer.from(canonicalJson(receipt), "utf8")),
+          runId
+        );
       if (result.changes !== 1) {
         throw new Error("Run was not staging and pending validation");
       }
@@ -852,7 +1005,6 @@ export class ContextStore {
 
   publishValidated(input: {
     readonly contextPackage: ContextPackage;
-    readonly artifacts: readonly ArtifactSnapshot[];
     readonly receipt: ContextReceipt;
   }): Result<ValidatedContextPackage> {
     const runId = input.contextPackage.runId;
@@ -868,9 +1020,17 @@ export class ContextStore {
       this.markFailed(runId, locked.error.message);
       return locked;
     }
+    const stagedArtifacts = this.#loadStagingArtifacts(runId);
+    if (!stagedArtifacts.ok) {
+      const cancelled = this.cancelValidation(
+        runId,
+        stagedArtifacts.error.message
+      );
+      return cancelled.ok ? stagedArtifacts : cancelled;
+    }
     const validated = validateContextPackage({
       contextPackage: input.contextPackage,
-      artifacts: input.artifacts,
+      artifacts: stagedArtifacts.value,
       store: this,
       phase: "staging"
     });
@@ -936,10 +1096,12 @@ export class ContextStore {
     try {
       const row = this.#database
         .prepare(
-          `SELECT receipt_json FROM runs
+          `SELECT receipt_json, receipt_hash FROM runs
            WHERE run_id=? AND status='committed' AND validation_status='validated'`
         )
-        .get(runId) as { receipt_json: string | null } | undefined;
+        .get(runId) as
+        | { receipt_json: string | null; receipt_hash: string | null }
+        | undefined;
       if (row?.receipt_json === null || row?.receipt_json === undefined) {
         return failure("RUN_NOT_COMMITTED", "Validated receipt was not found", {
           runId
@@ -955,6 +1117,15 @@ export class ContextStore {
       }
       if (canonicalJson(parsed.data) !== row.receipt_json) {
         return failure("INTEGRITY_ERROR", "Stored receipt is not canonical", {
+          runId
+        });
+      }
+      if (
+        parsed.data.runId !== runId ||
+        row.receipt_hash !==
+          sha256Base64Url(Buffer.from(row.receipt_json, "utf8"))
+      ) {
+        return failure("INTEGRITY_ERROR", "Stored receipt run binding is invalid", {
           runId
         });
       }

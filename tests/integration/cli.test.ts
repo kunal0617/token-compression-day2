@@ -210,6 +210,7 @@ describe("CLI commands", () => {
           }
         )
       ).toBe(0);
+
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }

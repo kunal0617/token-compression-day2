@@ -6,6 +6,7 @@ typed non-success result; no compressed success object is emitted.
 | Invariant | Validation |
 |---|---|
 | Artifact authority | Stored and in-memory byte lengths and full SHA-256 base64url digests match |
+| Staged authority | Publication validates artifact metadata and blobs reloaded from staged SQLite rows under the write lock |
 | Evidence identity | Evidence and occurrence IDs are unique; ranges and hashes match exact source bytes |
 | Protected closure | Protected ranges are bounded, reference real evidence, and do not intersect transforms or omissions |
 | Plan | Transforms are ordered, non-overlapping, benefit-positive, and 1:1 with omissions |
@@ -22,6 +23,8 @@ typed non-success result; no compressed success object is emitted.
 | Reconstruction | Concatenating literal bytes and retrieved omissions exactly equals every original artifact |
 | Token receipt | `js-tiktoken` remeasures actual `o200k_base` original and prepared token counts |
 | Publication | Run is atomically changed from staging/pending to committed/validated with its receipt |
+| Receipt binding | Canonical receipt digest, requested run ID, manifest-derived fields, handles, evidence, byte counts, and token counts agree |
+| Receipt migration | Historical hash backfill occurs only for schema-valid, canonical, run-matching committed receipts |
 
 The omission store is content-addressed by full digest but occurrences remain
 separate rows and handles. Identical omitted bytes can share an immutable blob

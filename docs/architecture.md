@@ -47,12 +47,18 @@ hashes, slicing, mappings, retrieval, and reconstruction use original bytes.
 2. The durable row remains `staging/pending`. Public manifest, receipt, compact
    output, and handle APIs cannot read it.
 3. Store-owned `publishValidated` acquires a SQLite write lock and runs the
-   validator. Validation uses run-scoped staging reads, including every
-   omission through its real SQLite handle path, while competing writes remain
-   blocked.
+   validator. It reloads authoritative artifact rows/blobs from SQLite and uses
+   run-scoped staging reads for the manifest, compact output, and every
+   omission handle while competing writes remain blocked.
 4. A private finalizer writes the receipt, changes the run to
    `committed/validated`, and commits the held transaction. Callers cannot
    publish without executing validation.
+5. Stored-run verification reloads the canonical, hashed, run-bound receipt and
+   rebuilds its source-derived fields from the committed manifest.
+
+When an older database first receives the `receipt_hash` column, only receipts
+that pass schema, canonical-form, and run-ID checks are backfilled. Corrupt
+historical receipts fail explicitly.
 5. Any validation failure changes only that staging run to `failed`. A staging
    crash remains invisible to public reads.
 

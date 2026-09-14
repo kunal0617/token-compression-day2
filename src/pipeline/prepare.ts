@@ -309,7 +309,6 @@ export async function prepareContext(input: PrepareInput): Promise<PrepareResult
     });
     const published = store.publishValidated({
       contextPackage,
-      artifacts,
       receipt
     });
     if (!published.ok) return published;

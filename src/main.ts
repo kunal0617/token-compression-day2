@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
-import { realpath, stat, writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { lstat, open, realpath, stat } from "node:fs/promises";
+import { basename, dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { prepareContext } from "./pipeline/prepare.js";
@@ -102,52 +102,144 @@ function directlyCollidesWithStore(storePath: string, outputPath: string): boole
   return [store, `${store}-wal`, `${store}-shm`].includes(output);
 }
 
-async function canonicalOutputCollision(
-  storePath: string,
-  outputPath: string
-): Promise<boolean> {
-  if (directlyCollidesWithStore(storePath, outputPath)) return true;
+interface ProspectivePath {
+  readonly canonicalPath: string;
+  readonly stats?: PathStats;
+}
+
+interface PathStats {
+  readonly dev: number | bigint;
+  readonly ino: number | bigint;
+  isSymbolicLink(): boolean;
+}
+
+export interface OutputPathProbe {
+  lstat(path: string): Promise<PathStats>;
+  realpath(path: string): Promise<string>;
+  stat(path: string): Promise<PathStats>;
+}
+
+const defaultOutputPathProbe: OutputPathProbe = { lstat, realpath, stat };
+
+function fileErrorCode(error: unknown): string | undefined {
+  return typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof error.code === "string"
+    ? error.code
+    : undefined;
+}
+
+async function resolveProspectivePath(
+  path: string,
+  rejectFinalSymlink: boolean,
+  probe: OutputPathProbe
+): Promise<Result<ProspectivePath>> {
+  const absolutePath = resolve(path);
   try {
-    const [outputRealPath, outputStat] = await Promise.all([
-      realpath(outputPath),
-      stat(outputPath)
-    ]);
-    for (const candidate of [storePath, `${storePath}-wal`, `${storePath}-shm`]) {
-      try {
-        const [candidateRealPath, candidateStat] = await Promise.all([
-          realpath(candidate),
-          stat(candidate)
-        ]);
-        if (
-          normalizedPath(candidateRealPath) === normalizedPath(outputRealPath) ||
-          (candidateStat.dev === outputStat.dev &&
-            candidateStat.ino === outputStat.ino)
-        ) {
-          return true;
-        }
-      } catch (error) {
-        const code =
-          typeof error === "object" &&
-          error !== null &&
-          "code" in error &&
-          typeof error.code === "string"
-            ? error.code
-            : undefined;
-        if (code !== "ENOENT") throw error;
-      }
+    const pathStats = await probe.lstat(absolutePath);
+    if (rejectFinalSymlink && pathStats.isSymbolicLink()) {
+      return failure(
+        "INVALID_ARGUMENT",
+        "Output path must not be a symbolic link, including a dangling link",
+        { path: absolutePath }
+      );
     }
-    return false;
+    const canonicalPath = await probe.realpath(absolutePath);
+    return success({
+      canonicalPath: normalizedPath(canonicalPath),
+      stats: await probe.stat(absolutePath)
+    });
   } catch (error) {
-    const code =
-      typeof error === "object" &&
-      error !== null &&
-      "code" in error &&
-      typeof error.code === "string"
-        ? error.code
-        : undefined;
-    if (code === "ENOENT") return false;
-    throw error;
+    if (fileErrorCode(error) !== "ENOENT") {
+      return failure("IO_ERROR", "Unable to inspect output path", {
+        path: absolutePath,
+        cause: error instanceof Error ? error.message : String(error)
+      });
+    }
   }
+
+  const suffix: string[] = [basename(absolutePath)];
+  let cursor = dirname(absolutePath);
+  while (true) {
+    try {
+      await probe.lstat(cursor);
+      try {
+        const canonicalParent = await probe.realpath(cursor);
+        return success({
+          canonicalPath: normalizedPath(
+            resolve(canonicalParent, ...suffix)
+          )
+        });
+      } catch (error) {
+        return failure(
+          "INVALID_ARGUMENT",
+          "Output path has an unresolved or dangling parent link",
+          {
+            path: absolutePath,
+            cause: error instanceof Error ? error.message : String(error)
+          }
+        );
+      }
+    } catch (error) {
+      if (fileErrorCode(error) !== "ENOENT") {
+        return failure("IO_ERROR", "Unable to inspect output parent", {
+          path: cursor,
+          cause: error instanceof Error ? error.message : String(error)
+        });
+      }
+      const parent = dirname(cursor);
+      if (parent === cursor) {
+        return failure("IO_ERROR", "No existing output parent was found", {
+          path: absolutePath
+        });
+      }
+      suffix.unshift(basename(cursor));
+      cursor = parent;
+    }
+  }
+}
+
+export async function checkOutputPathSafety(
+  storePath: string,
+  outputPath: string,
+  probe: OutputPathProbe = defaultOutputPathProbe
+): Promise<Result<void>> {
+  if (directlyCollidesWithStore(storePath, outputPath)) {
+    return failure(
+      "INVALID_ARGUMENT",
+      "--output must not overwrite the SQLite store or its WAL/SHM files"
+    );
+  }
+  const output = await resolveProspectivePath(outputPath, true, probe);
+  if (!output.ok) return output;
+  for (const candidatePath of [
+    storePath,
+    `${storePath}-wal`,
+    `${storePath}-shm`
+  ]) {
+    const candidate = await resolveProspectivePath(candidatePath, false, probe);
+    if (!candidate.ok) return candidate;
+    if (
+      output.value.canonicalPath === candidate.value.canonicalPath ||
+      (output.value.stats !== undefined &&
+        candidate.value.stats !== undefined &&
+        output.value.stats.dev === candidate.value.stats.dev &&
+        output.value.stats.ino === candidate.value.stats.ino)
+    ) {
+      return failure(
+        "INVALID_ARGUMENT",
+        "--output aliases the SQLite store or one of its sidecar files"
+      );
+    }
+  }
+  if (output.value.stats !== undefined) {
+    return failure(
+      "INVALID_ARGUMENT",
+      "--output already exists; refusing to overwrite it"
+    );
+  }
+  return success(undefined);
 }
 
 function writeJson(io: CliIo, value: unknown): void {
@@ -256,23 +348,12 @@ async function runPrepare(parsed: ParsedArgs, io: CliIo): Promise<number> {
     );
     return 2;
   }
-  if (
-    output.value !== undefined &&
-    directlyCollidesWithStore(store.value, output.value)
-  ) {
-    io.stderr(
-      "INVALID_ARGUMENT: --output must not overwrite the SQLite store or its WAL/SHM files\n"
-    );
-    return 2;
-  }
-  if (
-    output.value !== undefined &&
-    (await canonicalOutputCollision(store.value, resolve(output.value)))
-  ) {
-    io.stderr(
-      "INVALID_ARGUMENT: --output aliases the SQLite store or one of its sidecar files\n"
-    );
-    return 2;
+  if (output.value !== undefined) {
+    const safety = await checkOutputPathSafety(store.value, output.value);
+    if (!safety.ok) {
+      io.stderr(`${safety.error.code}: ${safety.error.message}\n`);
+      return 2;
+    }
   }
 
   const result = await prepareContext({
@@ -297,19 +378,16 @@ async function runPrepare(parsed: ParsedArgs, io: CliIo): Promise<number> {
     return 1;
   }
   if (output.value !== undefined) {
+    let outputHandle;
     try {
-      if (
-        await canonicalOutputCollision(
-          store.value,
-          resolve(output.value)
-        )
-      ) {
-        io.stderr(
-          "INVALID_ARGUMENT: --output aliases the validated SQLite store\n"
-        );
+      const safety = await checkOutputPathSafety(store.value, output.value);
+      if (!safety.ok) {
+        io.stderr(`${safety.error.code}: ${safety.error.message}\n`);
         return 2;
       }
-      await writeFile(resolve(output.value), result.value.package.preparedBytes);
+      outputHandle = await open(resolve(output.value), "wx");
+      await outputHandle.writeFile(result.value.package.preparedBytes);
+      await outputHandle.sync();
     } catch (error) {
       io.stderr(
         `IO_ERROR: unable to write validated output: ${
@@ -317,6 +395,8 @@ async function runPrepare(parsed: ParsedArgs, io: CliIo): Promise<number> {
         }\n`
       );
       return 1;
+    } finally {
+      await outputHandle?.close();
     }
   }
   writeJson(io, {

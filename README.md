@@ -32,7 +32,12 @@ provider. Its provider-neutral handoff port accepts only a
 - Outcomes are artifact-local: red wins the aggregate receipt, while an
   unrelated green artifact cannot authorize warning folding in an unknown one.
 - Validated output paths are checked against the store, WAL/SHM sidecars, and
-  canonical file identity before any write.
+  canonical file identity before any write. Final symlinks are rejected and
+  output is created exclusively without following an existing path.
+- Publication reloads artifact metadata and blobs from staged SQLite rows under
+  the write lock rather than trusting caller-held snapshots.
+- Receipts are canonical, hashed, run-bound, rebuilt from the manifest, and
+  checked again by stored-run verification.
 
 See [architecture](docs/architecture.md) and the
 [integrity model](docs/integrity-model.md). A source-backed

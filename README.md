@@ -170,6 +170,24 @@ reject, and cancel. Blocking obligations prevent approval, edits and target
 changes clear prior approval, and no payload bytes are returned for handoff
 unless the current approval digest revalidates.
 
+## Optional GitHub Copilot SDK adapter
+
+`@github/copilot-sdk` is an optional dependency loaded dynamically. The adapter
+uses empty mode with an explicit local state directory, creates or resumes a
+stable session, exposes only run-scoped `evidence_read` and `source_read`,
+records session events, and retrieves the dynamic model catalog.
+
+Every send revalidates the TUI approval and exact application payload hash.
+Permissions default to read-only custom tools; file writes, shell, and network
+are separate approval bits. Cross-run IDs and unapproved ranges fail. An
+application timeout races the SDK wait and calls `session.abort()` before
+returning failure.
+
+`npm run smoke:copilot` is inert by default. Setting
+`CTXO_LIVE_COPILOT=1` runs an explicit synthetic live smoke. The local smoke
+created a session with model `auto`, sent the exact approved hash, and received
+`CONTEXT_OVERFLOW_SMOKE_OK`.
+
 For CI summary logs, routine path/version/timestamp/identifier occurrences stay
 in the manifest but do not automatically protect neighboring lines. Source
 locations require credible file extensions or diagnostic/stack/compiler

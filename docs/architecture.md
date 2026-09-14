@@ -39,6 +39,7 @@ hashes, slicing, mappings, retrieval, and reconstruction use original bytes.
 | `source` | CQ-05 Tree-sitter units, TypeScript semantic edges, bounded delivery planning, and language fallback | Pure providers |
 | `approval` | CQ-07 captured/current selection, diff3 merge, canonical review subject, and stale approval rejection | Pure state transition |
 | `tui` | Terminal receipt/diff/evidence/gap/retrieval/target review and digest-bound actions | Terminal adapter + pure controller |
+| `adapters/copilot-sdk` | Optional approval-gated empty-mode Copilot session, scoped reads, permissions, events, catalog, and abort | Dynamic SDK adapter |
 | `segment` / `protect` | Structural lines and protected closure | Pure |
 | `reduce` | Proposals, benefit checks, and overlap resolution | Pure |
 | `render` | One compact render and mapping creation | Pure |

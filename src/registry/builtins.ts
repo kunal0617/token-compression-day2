@@ -52,6 +52,7 @@ import {
 } from "../source/tree-sitter.js";
 import { typeScriptSemanticEdgeProvider } from "../source/typescript-semantic.js";
 import { reviewSubjectProvider } from "../approval/review.js";
+import { optionalCopilotSdkAdapter } from "../adapters/copilot-sdk.js";
 import { segmentArtifact } from "../segment/segment.js";
 import { VersionedRegistry } from "./registry.js";
 import {
@@ -264,6 +265,7 @@ export function createBuiltinRuntime(): BuiltinRuntime {
     | typeof conservativeFileStructureProvider
     | typeof typeScriptSemanticEdgeProvider
     | typeof reviewSubjectProvider
+    | typeof optionalCopilotSdkAdapter
   >();
   const preparation = [
     artifactClassifier,
@@ -297,6 +299,8 @@ export function createBuiltinRuntime(): BuiltinRuntime {
     typeScriptSemanticEdgeProvider
     ,
     reviewSubjectProvider
+    ,
+    optionalCopilotSdkAdapter
   ]) {
     const registered = registry.register(producer);
     if (!registered.ok) throw new Error(registered.error.message);

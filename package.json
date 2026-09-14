@@ -16,7 +16,8 @@
     "test": "vitest run",
     "test:unit": "vitest run tests/unit",
     "test:integration": "vitest run tests/integration tests/adversarial tests/crash tests/mutation tests/property",
-    "smoke:bin": "node scripts/smoke-bin.mjs"
+    "smoke:bin": "node scripts/smoke-bin.mjs",
+    "smoke:copilot": "npm run build && node dist\\scripts\\copilot-sdk-smoke.js"
   },
   "engines": {
     "node": ">=22.13.0"
@@ -33,5 +34,8 @@
     "tree-sitter-typescript": "^0.23.2",
     "typescript": "^5.9.3",
     "zod": "^4.5.4"
+  },
+  "optionalDependencies": {
+    "@github/copilot-sdk": "^1.0.13"
   }
 }

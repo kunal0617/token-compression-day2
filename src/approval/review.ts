@@ -142,9 +142,16 @@ export interface ReviewSubjectInput {
   }[];
   readonly policyDigest: string;
   readonly detectorRegistryDigest: string;
+  readonly reviewProducerRegistry: {
+    readonly digest: string;
+    readonly producers: readonly ProducerMetadata[];
+  };
+  readonly readScopeDigest: string;
+  readonly evidenceDecision: "ready" | "gather-more-evidence";
   readonly tokenizer: string;
   readonly target: ApprovalTarget;
   readonly snapshotChoice: SnapshotChoice;
+  readonly payloadRole: ReviewSubject["payloadRole"];
   readonly createdAt?: string;
 }
 
@@ -153,7 +160,7 @@ export class ReviewSubjectProvider
 {
   readonly metadata = producer(
     "builtin.cq07.review-subject",
-    "1.0.0",
+    "2.0.0",
     [
       "payload",
       "sources",
@@ -165,11 +172,41 @@ export class ReviewSubjectProvider
       "model",
       "cwd",
       "permissions",
-      "snapshot-choice"
+      "snapshot-choice",
+      "payload-role",
+      "read-scope",
+      "evidence-decision",
+      "review-producer-registry"
     ]
   );
 
   provide(input: ReviewSubjectInput): Result<ReviewSubject> {
+    if (
+      input.runId.length === 0 ||
+      input.sourceIdentities.some(
+        (source) =>
+          source.sourceId.length === 0 ||
+          source.identity.byteLength < 0 ||
+          !Number.isSafeInteger(source.identity.byteLength) ||
+          !/^[A-Za-z0-9_-]{43}$/.test(source.identity.sha256)
+      ) ||
+      new Set(input.sourceIdentities.map((source) => source.sourceId))
+        .size !== input.sourceIdentities.length ||
+      !/^[A-Za-z0-9_-]{43}$/.test(input.policyDigest) ||
+      !/^[A-Za-z0-9_-]{43}$/.test(input.detectorRegistryDigest) ||
+      input.reviewProducerRegistry.digest !==
+        canonicalJsonDigest(input.reviewProducerRegistry.producers) ||
+      !/^[A-Za-z0-9_-]{43}$/.test(input.readScopeDigest) ||
+      input.tokenizer.length === 0 ||
+      input.target.adapterId.length === 0 ||
+      input.target.workingDirectory.length === 0 ||
+      input.snapshotChoice === "cancel"
+    ) {
+      return failure(
+        "INTEGRITY_ERROR",
+        "Review subject inputs are invalid or ambiguous"
+      );
+    }
     const createdAt = input.createdAt ?? new Date().toISOString();
     const unsigned = {
       reviewSubjectId: deterministicUuid(
@@ -179,13 +216,20 @@ export class ReviewSubjectProvider
       payloadSha256: sha256Base64Url(input.payload),
       payloadByteLength: input.payload.length,
       sourceIdentities: [...input.sourceIdentities].sort((left, right) =>
-        left.sourceId.localeCompare(right.sourceId)
+        Buffer.compare(
+          Buffer.from(left.sourceId, "utf8"),
+          Buffer.from(right.sourceId, "utf8")
+        )
       ),
       policyDigest: input.policyDigest,
       detectorRegistryDigest: input.detectorRegistryDigest,
+      reviewProducerRegistry: input.reviewProducerRegistry,
+      readScopeDigest: input.readScopeDigest,
+      evidenceDecision: input.evidenceDecision,
       tokenizer: input.tokenizer,
       target: input.target,
       snapshotChoice: input.snapshotChoice,
+      payloadRole: input.payloadRole,
       createdAt,
       producer: this.metadata
     };
@@ -196,14 +240,48 @@ export class ReviewSubjectProvider
   }
 }
 
+function decisionMatchesSubject(
+  decision: ApprovalDecision,
+  subject: ReviewSubject
+): boolean {
+  return (
+    (decision === "approve-prepared" &&
+      subject.payloadRole === "prepared" &&
+      subject.snapshotChoice === "captured") ||
+    (decision === "keep-original" &&
+      subject.payloadRole === "captured" &&
+      subject.snapshotChoice === "captured") ||
+    (decision === "approve-selected" &&
+      ((subject.payloadRole === "current" &&
+        subject.snapshotChoice === "current") ||
+        (subject.payloadRole === "both" &&
+          subject.snapshotChoice === "both"))) ||
+    (decision === "approve-merged" &&
+      subject.payloadRole === "merged" &&
+      subject.snapshotChoice === "editable-merge")
+  );
+}
+
 export function approveReviewSubject(input: {
   readonly subject: ReviewSubject;
   readonly payload: Buffer;
   readonly decision: ApprovalDecision;
   readonly approvedAt?: string;
 }): Result<ApprovalRecord> {
+  if (input.subject.evidenceDecision !== "ready") {
+    return failure(
+      "INVALID_ARGUMENT",
+      "Gather More Evidence must complete before approval"
+    );
+  }
   if (input.decision === "reject") {
     return failure("INVALID_ARGUMENT", "Rejected review subjects are not approvals");
+  }
+  if (!decisionMatchesSubject(input.decision, input.subject)) {
+    return failure(
+      "INVALID_ARGUMENT",
+      "Approval decision does not match selected payload role and snapshot"
+    );
   }
   if (
     input.payload.length !== input.subject.payloadByteLength ||
@@ -214,6 +292,7 @@ export function approveReviewSubject(input: {
       "Approval payload does not match the review subject"
     );
   }
+
   const approvedAt = input.approvedAt ?? new Date().toISOString();
   const unsigned = {
     approvalId: deterministicUuid(
@@ -242,9 +321,13 @@ export function validateApproval(input: {
     sourceIdentities: subject.sourceIdentities,
     policyDigest: subject.policyDigest,
     detectorRegistryDigest: subject.detectorRegistryDigest,
+    reviewProducerRegistry: subject.reviewProducerRegistry,
+    readScopeDigest: subject.readScopeDigest,
+    evidenceDecision: subject.evidenceDecision,
     tokenizer: subject.tokenizer,
     target: subject.target,
     snapshotChoice: subject.snapshotChoice,
+    payloadRole: subject.payloadRole,
     createdAt: subject.createdAt,
     producer: subject.producer
   };
@@ -257,6 +340,9 @@ export function validateApproval(input: {
     approvedAt: approval.approvedAt
   };
   if (
+    !decisionMatchesSubject(approval.decision, subject) ||
+    canonicalJsonDigest(subject.producer) !==
+      canonicalJsonDigest(reviewSubjectProvider.metadata) ||
     subject.digest !== canonicalJsonDigest(subjectWithoutDigest) ||
     approval.digest !== canonicalJsonDigest(approvalWithoutDigest) ||
     approval.runId !== subject.runId ||
@@ -278,4 +364,3 @@ export function reviewSubjectCanonicalJson(subject: ReviewSubject): string {
 }
 
 export const reviewSubjectProvider = new ReviewSubjectProvider();
-

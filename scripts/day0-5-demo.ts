@@ -1,18 +1,14 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
-import { reviewSubjectProvider } from "../src/approval/review.js";
 import { OfflineHandoffPort } from "../src/ports/handoff.js";
-import type { EvaluationObservation } from "../src/contracts/evaluation.js";
 import type { ApprovedSourceCandidate } from "../src/contracts/provenance.js";
 import type { SourceDocument } from "../src/contracts/source-scope.js";
 import { canonicalJsonDigest } from "../src/core/canonical.js";
 import { sha256Base64Url } from "../src/core/hash.js";
 import { ExternalLocalFixtureAdapter } from "../src/evaluation/external.js";
 import {
-  createReplayManifest,
-  evaluationMarkdown,
-  runPairedEvaluation
+  createReplayManifest
 } from "../src/evaluation/harness.js";
 import { createCuratedModelPolicy, deterministicModelFitAdviser } from "../src/model/advice.js";
 import { assessFailureEvidence } from "../src/obligations/evaluate.js";
@@ -161,8 +157,24 @@ try {
     {
       contextPackage: verified.value,
       receipt: prepared.value.receipt,
-      originalBytes,
+      capturedBytes: originalBytes,
       artifacts: snapshots.value,
+      readScope: {
+        runId: verified.value.runId,
+        evidence: verified.value.manifest.evidence.map((evidence) => {
+          const artifact = snapshots.value.find(
+            (item) => item.artifactId === evidence.artifactId
+          ) as (typeof snapshots.value)[number];
+          return {
+            span: evidence,
+            bytes: artifact.bytes.subarray(
+              evidence.startByte,
+              evidence.endByte
+            )
+          };
+        }),
+        sources: []
+      },
       target: {
         adapterId: "offline",
         modelId: "routine-demo",
@@ -208,48 +220,8 @@ try {
       adapterId: "recorded-fallback"
     },
     seed: 20260915,
-    liveOptIn: true
+    liveOptIn: false
   });
-  const evaluation = await runPairedEvaluation({
-    manifest,
-    runner: {
-      run: async (plan, testCase) => {
-        const preparedArm = plan.arm === "prepared";
-        const observation: EvaluationObservation = {
-          trialId: plan.trialId,
-          caseId: plan.caseId,
-          arm: plan.arm,
-          modelId: plan.settings.modelId,
-          settingsDigest: canonicalJsonDigest(plan.settings),
-          sessionConstraintDigest: plan.sessionConstraintDigest,
-          taskSuccess: preparedArm,
-          visibleEvidenceIds: preparedArm
-            ? testCase.expectedEvidenceIds
-            : [],
-          recoverableEvidenceIds: testCase.expectedEvidenceIds,
-          distinctFailureIds: preparedArm
-            ? testCase.expectedFailureIds
-            : [],
-          citations: preparedArm ? testCase.expectedCitations : [],
-          unsupportedClaims: 0,
-          contradictions: 0,
-          abstained: testCase.allowAbstention && !preparedArm,
-          retrievalTokens: preparedArm ? 10 : 0,
-          retrievalCalls: preparedArm ? 1 : 0,
-          retrievalLatencyMs: preparedArm ? 2 : 0,
-          preparationLatencyMs: preparedArm ? 5 : 0,
-          reviewLatencyMs: 1,
-          handoffLatencyMs: 1,
-          modelLatencyMs: 10,
-          decisions: 1,
-          tools: preparedArm ? 1 : 0,
-          permissions: 0
-        };
-        return { ok: true as const, value: observation };
-      }
-    }
-  });
-  if (!evaluation.ok) throw new Error(evaluation.error.message);
 
   const bundle = {
     formatVersion: 1,
@@ -279,8 +251,10 @@ try {
     },
     handoff: handoff.value,
     evaluation: {
-      report: evaluation.value,
-      markdown: evaluationMarkdown(evaluation.value)
+      kind: "synthetic-wiring-only",
+      replayManifest: manifest,
+      note:
+        "No comparative statistics are emitted because this offline demo does not execute a model or independent recorded adapter."
     },
     integrity: verified.value.validation
   };
@@ -296,7 +270,7 @@ try {
         runId: bundle.runId,
         tokens: `${bundle.receipt.originalTokens} -> ${bundle.receipt.preparedTokens}`,
         approvalDigest: bundle.review.approvalDigest,
-        evaluationDifference: bundle.evaluation.report.meanDifference,
+        plannedEvaluationTrials: bundle.evaluation.replayManifest.plans.length,
         integrity: bundle.integrity
       },
       null,
@@ -306,4 +280,3 @@ try {
 } finally {
   store.close();
 }
-

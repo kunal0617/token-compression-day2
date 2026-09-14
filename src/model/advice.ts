@@ -12,7 +12,7 @@ import type {
   ProducerMetadata
 } from "../contracts/providers.js";
 import { canonicalJsonDigest } from "../core/canonical.js";
-import { success, type Result } from "../core/result.js";
+import { failure, success, type Result } from "../core/result.js";
 
 function producer(): ProducerMetadata {
   const producerId = "builtin.mf.model-fit-adviser";
@@ -111,16 +111,19 @@ function scoreModel(
     "contextWindow",
     "maxPromptTokens"
   ]);
-  if (context !== undefined && context < request.requiredInputTokens) {
+  if (context === undefined) {
+    eligible = false;
+    reasons.push("Model does not advertise a context limit");
+  } else if (context < request.requiredInputTokens) {
     eligible = false;
     reasons.push("Model context limit is below required input tokens");
   }
   if (
     request.requiresTools &&
-    capabilityBoolean(model, ["supportsTools", "tools"]) === false
+    capabilityBoolean(model, ["supportsTools", "tools"]) !== true
   ) {
     eligible = false;
-    reasons.push("Model does not support required tools");
+    reasons.push("Model does not positively advertise required tools");
   }
   if (
     request.requiresVision &&
@@ -160,6 +163,24 @@ export class DeterministicModelFitAdviser
   readonly metadata = producer();
 
   provide(request: ModelFitRequest): Result<ModelFitAdvice> {
+    if (
+      request.policy.digest !==
+        canonicalJsonDigest({
+          version: request.policy.version,
+          entries: request.policy.entries
+        }) ||
+      new Set(request.policy.entries.map((entry) => entry.modelId)).size !==
+        request.policy.entries.length ||
+      new Set(request.catalog.map((model) => model.id)).size !==
+        request.catalog.length ||
+      !Number.isSafeInteger(request.requiredInputTokens) ||
+      request.requiredInputTokens < 0
+    ) {
+      return failure(
+        "INTEGRITY_ERROR",
+        "Model catalog, policy, or token requirement is invalid"
+      );
+    }
     const scores = request.catalog
       .map((model) => scoreModel(model, request))
       .sort(
@@ -193,6 +214,37 @@ export class DeterministicModelFitAdviser
       request.currentModelId === undefined
         ? undefined
         : scores.find((score) => score.modelId === request.currentModelId);
+    const tiedBest =
+      best === undefined
+        ? []
+        : scores.filter(
+            (score) => score.eligible && score.score === best.score
+          );
+    if (
+      request.currentModelId !== undefined &&
+      best !== undefined &&
+      (current === undefined ||
+        (tiedBest.length > 1 &&
+          !tiedBest.some(
+            (score) => score.modelId === request.currentModelId
+          )))
+    ) {
+      return success({
+        operation: request.operation,
+        decision: "keep-current",
+        currentModelId: request.currentModelId,
+        requiresNewSession: false,
+        scores,
+        reasons: [
+          current === undefined
+            ? "Current model is absent from the catalog; keep current under uncertainty"
+            : "Top model scores conflict; keep current"
+        ],
+        policyVersion: request.policy.version,
+        policyDigest: request.policy.digest,
+        producer: this.metadata
+      });
+    }
     if (
       best === undefined ||
       (current?.eligible === true && current.score >= best.score)

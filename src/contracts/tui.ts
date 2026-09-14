@@ -11,6 +11,10 @@ import type {
   ValidatedContextPackage
 } from "./types.js";
 import type { EvidenceObligation } from "./providers.js";
+import type { AgentReadScope } from "./agent.js";
+import type { EvidenceFact } from "./obligations.js";
+import type { SourceSnapshotIdentity } from "./provenance.js";
+import type { Result } from "../core/result.js";
 
 export interface ReviewViewModel {
   readonly runId: string;
@@ -45,6 +49,7 @@ export interface ReviewViewModel {
 
 export type ReviewAction =
   | { readonly type: "approve-prepared" }
+  | { readonly type: "approve-selected" }
   | { readonly type: "keep-original" }
   | { readonly type: "approve-merged" }
   | { readonly type: "gather-evidence" }
@@ -54,6 +59,7 @@ export type ReviewAction =
       readonly choice: Exclude<SnapshotChoice, "cancel">;
     }
   | { readonly type: "edit-result"; readonly bytes: Buffer }
+  | { readonly type: "add-evidence-facts"; readonly facts: readonly EvidenceFact[] }
   | { readonly type: "set-target"; readonly target: ApprovalTarget }
   | { readonly type: "reject" }
   | { readonly type: "cancel" };
@@ -61,9 +67,24 @@ export type ReviewAction =
 export interface TerminalReviewInput {
   readonly contextPackage: ValidatedContextPackage;
   readonly receipt: ContextReceipt;
-  readonly originalBytes: Buffer;
+  readonly capturedBytes: Buffer;
   readonly artifacts: readonly ArtifactSnapshot[];
+  readonly readScope: AgentReadScope;
+  readonly gatheredFacts?: readonly EvidenceFact[];
+  readonly currentSource?: CurrentSourceReadPort;
   readonly target: ApprovalTarget;
+}
+
+export interface CurrentSnapshotCapture {
+  readonly bytes: Buffer;
+  readonly sourceIdentities: readonly {
+    readonly sourceId: string;
+    readonly identity: SourceSnapshotIdentity;
+  }[];
+}
+
+export interface CurrentSourceReadPort {
+  capture(): Result<CurrentSnapshotCapture>;
 }
 
 export interface ApprovedReviewPayload {

@@ -24,6 +24,13 @@ export type SnapshotChoice =
   | "editable-merge"
   | "cancel";
 
+export type ApprovalPayloadRole =
+  | "prepared"
+  | "captured"
+  | "current"
+  | "both"
+  | "merged";
+
 export interface ReviewSubject {
   readonly reviewSubjectId: string;
   readonly runId: string;
@@ -35,9 +42,16 @@ export interface ReviewSubject {
   }[];
   readonly policyDigest: string;
   readonly detectorRegistryDigest: string;
+  readonly reviewProducerRegistry: {
+    readonly digest: string;
+    readonly producers: readonly ProducerMetadata[];
+  };
+  readonly readScopeDigest: string;
+  readonly evidenceDecision: "ready" | "gather-more-evidence";
   readonly tokenizer: string;
   readonly target: ApprovalTarget;
   readonly snapshotChoice: SnapshotChoice;
+  readonly payloadRole: ApprovalPayloadRole;
   readonly createdAt: string;
   readonly producer: ProducerMetadata;
   readonly digest: string;
@@ -45,6 +59,7 @@ export interface ReviewSubject {
 
 export type ApprovalDecision =
   | "approve-prepared"
+  | "approve-selected"
   | "keep-original"
   | "approve-merged"
   | "reject";
@@ -77,4 +92,3 @@ export interface Diff3MergeResult {
   readonly conflicted: boolean;
   readonly requiresFreshApproval: true;
 }
-

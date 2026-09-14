@@ -11,12 +11,14 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "npm run typecheck && npm test && npm run build && npm run smoke:bin",
+    "check:full-capability": "npm run check && npm run smoke:copilot",
     "demo": "npm run build && node dist\\scripts\\run-demo.js",
     "demo:day0-5": "npm run build && node dist\\scripts\\day0-5-demo.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:unit": "vitest run tests/unit",
     "test:integration": "vitest run tests/integration tests/adversarial tests/crash tests/mutation tests/property",
+    "test:parity": "vitest run tests/unit/provenance.test.ts tests/unit/failure-parsers.test.ts tests/unit/obligations.test.ts tests/unit/source-scope.test.ts tests/unit/approval.test.ts tests/integration/tui.test.ts tests/unit/copilot-sdk-adapter.test.ts tests/unit/model-fit.test.ts tests/unit/helper.test.ts tests/unit/security.test.ts tests/unit/evaluation.test.ts tests/migration/producer-registry.test.ts",
     "smoke:bin": "node scripts/smoke-bin.mjs",
     "smoke:copilot": "npm run build && node dist\\scripts\\copilot-sdk-smoke.js"
   },

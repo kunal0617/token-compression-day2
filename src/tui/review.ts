@@ -3,14 +3,18 @@ import { stdin as input, stdout as output } from "node:process";
 
 import type {
   ApprovedReviewPayload,
+  CurrentSnapshotCapture,
   ReviewAction,
   ReviewViewModel,
   TerminalReviewInput
 } from "../contracts/tui.js";
 import type { ApprovalRecord, ReviewSubject } from "../contracts/approval.js";
 import type { EvidenceObligation } from "../contracts/providers.js";
+import type { EvidenceFact } from "../contracts/obligations.js";
+import type { SourceSnapshotIdentity } from "../contracts/provenance.js";
 import { canonicalJsonDigest } from "../core/canonical.js";
 import { sha256Base64Url } from "../core/hash.js";
+import { agentReadScopeDigest } from "../core/read-scope.js";
 import { failure, success, type Result } from "../core/result.js";
 import {
   approveReviewSubject,
@@ -24,6 +28,11 @@ import { assessSecurity } from "../security/security.js";
 
 export interface ReviewRetrievalPort {
   retrieve(handle: string): Result<Buffer>;
+  loadReviewFacts?(runId: string): Result<readonly EvidenceFact[]>;
+  saveReviewFacts?(
+    runId: string,
+    facts: readonly EvidenceFact[]
+  ): Result<void>;
 }
 
 function sourceDiff(input: TerminalReviewInput): readonly string[] {
@@ -49,14 +58,19 @@ function transformationLines(input: TerminalReviewInput): readonly string[] {
   );
 }
 
-function obligations(input: TerminalReviewInput): readonly EvidenceObligation[] {
+function obligations(
+  input: TerminalReviewInput,
+  gatheredFacts: readonly EvidenceFact[]
+): readonly EvidenceObligation[] {
   const results: EvidenceObligation[] = [];
   for (const artifact of input.artifacts) {
+    if (artifact.role === "prompt") continue;
     const assessed = assessFailureEvidence({
       artifact,
       evidence: input.contextPackage.manifest.evidence.filter(
         (evidence) => evidence.artifactId === artifact.artifactId
-      )
+      ),
+      additionalFacts: gatheredFacts
     });
     if (assessed.ok) results.push(...assessed.value.sufficiency.obligations);
   }
@@ -78,17 +92,31 @@ export class TerminalReviewController {
   readonly #retrieval: ReviewRetrievalPort;
   #target;
   #selectedBytes: Buffer;
+  #selectedSourceIdentities: readonly {
+    readonly sourceId: string;
+    readonly identity: SourceSnapshotIdentity;
+  }[];
   #selectedSnapshot: ReviewViewModel["selectedSnapshot"] = "captured";
+  #payloadRole: ReviewSubject["payloadRole"] = "prepared";
   #subject: ReviewSubject | undefined;
   #approval: ApprovalRecord | undefined;
   #status: ReviewViewModel["status"] = "reviewing";
   readonly #security;
+  #gatheredFacts: EvidenceFact[];
 
   constructor(input: TerminalReviewInput, retrieval: ReviewRetrievalPort) {
     this.#input = input;
     this.#retrieval = retrieval;
     this.#target = input.target;
     this.#selectedBytes = Buffer.from(input.contextPackage.preparedBytes);
+    this.#selectedSourceIdentities = sourceIdentities(input);
+    const persisted = retrieval.loadReviewFacts?.(
+      input.contextPackage.runId
+    );
+    this.#gatheredFacts = [
+      ...(input.gatheredFacts ?? []),
+      ...(persisted?.ok ? persisted.value : [])
+    ];
     this.#security = assessSecurity(
       input.artifacts.map((artifact) => ({
         sourceId: artifact.artifactId,
@@ -107,7 +135,24 @@ export class TerminalReviewController {
     if (this.#status === "approved") this.#status = "reviewing";
   }
 
-  #approve(decision: "approve-prepared" | "keep-original" | "approve-merged"): Result<void> {
+  #captureCurrent(): Result<CurrentSnapshotCapture> {
+    const current = this.#input.currentSource?.capture();
+    return (
+      current ??
+      failure(
+        "INVALID_ARGUMENT",
+        "Current source recapture is unavailable"
+      )
+    );
+  }
+
+  #approve(
+    decision:
+      | "approve-prepared"
+      | "approve-selected"
+      | "keep-original"
+      | "approve-merged"
+  ): Result<void> {
     const gaps = this.view().gaps;
     if (gaps.length > 0) {
       return failure(
@@ -116,19 +161,63 @@ export class TerminalReviewController {
         { obligations: gaps.map((gap) => gap.obligationId) }
       );
     }
+    if (
+      this.#selectedSnapshot === "current" ||
+      this.#selectedSnapshot === "both"
+    ) {
+      const current = this.#captureCurrent();
+      if (!current.ok) return current;
+      const selected = selectSnapshot({
+        choice: this.#selectedSnapshot,
+        captured: this.#input.capturedBytes,
+        current: current.value.bytes
+      });
+      if (
+        !selected.ok ||
+        !selected.value.bytes.equals(this.#selectedBytes)
+      ) {
+        this.#clearApproval();
+        return failure(
+          "INTEGRITY_ERROR",
+          "Current source changed during review; select it again"
+        );
+      }
+      this.#selectedSourceIdentities =
+        this.#selectedSnapshot === "current"
+          ? current.value.sourceIdentities
+          : [
+              ...sourceIdentities(this.#input).map((item) => ({
+                sourceId: `captured:${item.sourceId}`,
+                identity: item.identity
+              })),
+              ...current.value.sourceIdentities.map((item) => ({
+                sourceId: `current:${item.sourceId}`,
+                identity: item.identity
+              }))
+            ];
+    }
+    const readScopeDigest = agentReadScopeDigest(this.#input.readScope);
+    if (!readScopeDigest.ok) return readScopeDigest;
     const subject = reviewSubjectProvider.provide({
       runId: this.#input.contextPackage.runId,
       payload: this.#selectedBytes,
-      sourceIdentities: sourceIdentities(this.#input),
+      sourceIdentities: this.#selectedSourceIdentities,
       policyDigest: canonicalJsonDigest(
         this.#input.contextPackage.manifest.policy
       ),
       detectorRegistryDigest:
         this.#input.contextPackage.manifest.producerRegistry?.digest ??
         builtinRuntime.registryDigest,
+      reviewProducerRegistry: {
+        digest: builtinRuntime.reviewRegistryDigest,
+        producers: builtinRuntime.reviewProducers
+      },
+      readScopeDigest: readScopeDigest.value,
+      evidenceDecision: gaps.length === 0 ? "ready" : "gather-more-evidence",
       tokenizer: this.#input.contextPackage.manifest.tokenizer.encoding,
       target: this.#target,
-      snapshotChoice: this.#selectedSnapshot
+      snapshotChoice: this.#selectedSnapshot,
+      payloadRole: this.#payloadRole
     });
     if (!subject.ok) return subject;
     const approval = approveReviewSubject({
@@ -155,14 +244,44 @@ export class TerminalReviewController {
     if (action.type === "edit-result") {
       this.#selectedBytes = Buffer.from(action.bytes);
       this.#selectedSnapshot = "editable-merge";
+      this.#payloadRole = "merged";
       this.#clearApproval();
       return success(undefined);
     }
+    if (action.type === "add-evidence-facts") {
+      this.#gatheredFacts = [
+        ...new Map(
+          [...this.#gatheredFacts, ...action.facts].map((fact) => [
+            fact.factId,
+            fact
+          ])
+        ).values()
+      ];
+      const saved = this.#retrieval.saveReviewFacts?.(
+        this.#input.contextPackage.runId,
+        this.#gatheredFacts
+      );
+      if (saved !== undefined && !saved.ok) return saved;
+      this.#clearApproval();
+      this.#status = "reviewing";
+      return success(undefined);
+    }
     if (action.type === "choose-snapshot") {
+      let currentBytes = this.#input.capturedBytes;
+      let currentIdentities: readonly {
+        readonly sourceId: string;
+        readonly identity: SourceSnapshotIdentity;
+      }[] = sourceIdentities(this.#input);
+      if (action.choice !== "captured") {
+        const current = this.#captureCurrent();
+        if (!current.ok) return current;
+        currentBytes = current.value.bytes;
+        currentIdentities = current.value.sourceIdentities;
+      }
       const selected = selectSnapshot({
         choice: action.choice,
-        captured: this.#input.contextPackage.preparedBytes,
-        current: this.#input.originalBytes,
+        captured: this.#input.capturedBytes,
+        current: currentBytes,
         ...(action.choice === "editable-merge"
           ? { editedMerge: this.#selectedBytes }
           : {})
@@ -170,6 +289,29 @@ export class TerminalReviewController {
       if (!selected.ok) return selected;
       this.#selectedBytes = selected.value.bytes;
       this.#selectedSnapshot = action.choice;
+      this.#payloadRole =
+        action.choice === "current"
+          ? "current"
+          : action.choice === "both"
+            ? "both"
+            : action.choice === "editable-merge"
+              ? "merged"
+              : "captured";
+      this.#selectedSourceIdentities =
+        action.choice === "captured"
+          ? sourceIdentities(this.#input)
+          : action.choice === "current"
+            ? currentIdentities
+            : [
+                ...sourceIdentities(this.#input).map((item) => ({
+                  sourceId: `captured:${item.sourceId}`,
+                  identity: item.identity
+                })),
+                ...currentIdentities.map((item) => ({
+                  sourceId: `current:${item.sourceId}`,
+                  identity: item.identity
+                }))
+              ];
       this.#clearApproval();
       return success(undefined);
     }
@@ -178,11 +320,18 @@ export class TerminalReviewController {
         this.#input.contextPackage.preparedBytes
       );
       this.#selectedSnapshot = "captured";
+      this.#payloadRole = "prepared";
+      this.#selectedSourceIdentities = sourceIdentities(this.#input);
       return this.#approve("approve-prepared");
     }
+    if (action.type === "approve-selected") {
+      return this.#approve("approve-selected");
+    }
     if (action.type === "keep-original") {
-      this.#selectedBytes = Buffer.from(this.#input.originalBytes);
-      this.#selectedSnapshot = "current";
+      this.#selectedBytes = Buffer.from(this.#input.capturedBytes);
+      this.#selectedSnapshot = "captured";
+      this.#payloadRole = "captured";
+      this.#selectedSourceIdentities = sourceIdentities(this.#input);
       return this.#approve("keep-original");
     }
     if (action.type === "approve-merged") {
@@ -216,6 +365,48 @@ export class TerminalReviewController {
         "No digest-bound approval is active"
       );
     }
+    if (
+      this.#selectedSnapshot === "current" ||
+      this.#selectedSnapshot === "both"
+    ) {
+      const current = this.#captureCurrent();
+      if (!current.ok) return current;
+      const selected = selectSnapshot({
+        choice: this.#selectedSnapshot,
+        captured: this.#input.capturedBytes,
+        current: current.value.bytes
+      });
+      if (!selected.ok || !selected.value.bytes.equals(this.#selectedBytes)) {
+        this.#clearApproval();
+        return failure(
+          "INTEGRITY_ERROR",
+          "Current source changed after approval"
+        );
+      }
+      const identities =
+        this.#selectedSnapshot === "current"
+          ? current.value.sourceIdentities
+          : [
+              ...sourceIdentities(this.#input).map((item) => ({
+                sourceId: `captured:${item.sourceId}`,
+                identity: item.identity
+              })),
+              ...current.value.sourceIdentities.map((item) => ({
+                sourceId: `current:${item.sourceId}`,
+                identity: item.identity
+              }))
+            ];
+      if (
+        canonicalJsonDigest(identities) !==
+        canonicalJsonDigest(this.#selectedSourceIdentities)
+      ) {
+        this.#clearApproval();
+        return failure(
+          "INTEGRITY_ERROR",
+          "Current source identity changed after approval"
+        );
+      }
+    }
     const valid = validateApproval({
       subject: this.#subject,
       approval: this.#approval,
@@ -230,7 +421,7 @@ export class TerminalReviewController {
   }
 
   view(): ReviewViewModel {
-    const gaps = obligations(this.#input).filter(
+    const gaps = obligations(this.#input, this.#gatheredFacts).filter(
       (obligation) => obligation.status !== "satisfied"
     );
     return {
@@ -308,11 +499,16 @@ export async function runTerminalReview(
       printView(view, (value) => io.write(value));
       const answer = (
         await io.question(
-          "Command [approve/approve-merged/original/gather/snapshot <captured|current|both>/diff/evidence/gaps/conflicts/security/model/omissions/retrieve <handle>/edit <text>/target <adapter> <model|-> <session|-> <permissions>/reject/cancel]: "
+          "Command [approve/approve-selected/approve-merged/original/gather/fact <json>/snapshot <captured|current|both>/diff/evidence/gaps/conflicts/security/model/omissions/retrieve <handle>/edit <text>/target <adapter> <model|-> <session|-> <permissions>/reject/cancel]: "
         )
       ).trim();
       if (answer === "approve") {
         const result = controller.dispatch({ type: "approve-prepared" });
+        if (!result.ok) return result;
+        return controller.approvedPayload();
+      }
+      if (answer === "approve-selected") {
+        const result = controller.dispatch({ type: "approve-selected" });
         if (!result.ok) return result;
         return controller.approvedPayload();
       }
@@ -329,6 +525,23 @@ export async function runTerminalReview(
       if (answer === "gather") {
         controller.dispatch({ type: "gather-evidence" });
         return success(undefined);
+      }
+      if (answer.startsWith("fact ")) {
+        try {
+          const fact = JSON.parse(
+            answer.slice("fact ".length)
+          ) as EvidenceFact;
+          const added = controller.dispatch({
+            type: "add-evidence-facts",
+            facts: [fact]
+          });
+          if (!added.ok) return added;
+        } catch (error) {
+          return failure("INVALID_ARGUMENT", "Invalid evidence fact JSON", {
+            cause: error instanceof Error ? error.message : String(error)
+          });
+        }
+        continue;
       }
       if (answer === "diff") {
         io.write(`${view.sourceDiff.join("\n")}\n`);

@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import type { ReviewSubject } from "../../src/contracts/approval.js";
+import type {
+  ApprovalPayloadRole,
+  SnapshotChoice
+} from "../../src/contracts/approval.js";
 import { canonicalJsonDigest } from "../../src/core/canonical.js";
 import { sha256Base64Url } from "../../src/core/hash.js";
 import {
@@ -12,7 +16,11 @@ import {
   validateApproval
 } from "../../src/approval/review.js";
 
-function subject(payload = Buffer.from("prepared", "utf8")) {
+function subject(
+  payload = Buffer.from("prepared", "utf8"),
+  payloadRole: ApprovalPayloadRole = "prepared",
+  snapshotChoice: SnapshotChoice = "captured"
+) {
   return reviewSubjectProvider.provide({
     runId: "run-1",
     payload,
@@ -27,6 +35,16 @@ function subject(payload = Buffer.from("prepared", "utf8")) {
     ],
     policyDigest: canonicalJsonDigest("policy"),
     detectorRegistryDigest: canonicalJsonDigest("detectors"),
+    reviewProducerRegistry: {
+      digest: canonicalJsonDigest([]),
+      producers: []
+    },
+    readScopeDigest: canonicalJsonDigest({
+      runId: "run-1",
+      evidence: [],
+      sources: []
+    }),
+    evidenceDecision: "ready",
     tokenizer: "o200k_base",
     target: {
       adapterId: "offline",
@@ -41,7 +59,8 @@ function subject(payload = Buffer.from("prepared", "utf8")) {
         network: false
       }
     },
-    snapshotChoice: "captured",
+    snapshotChoice,
+    payloadRole,
     createdAt: "2030-01-01T00:00:00.000Z"
   });
 }
@@ -170,5 +189,114 @@ describe("CQ-07 snapshot and approval binding", () => {
     });
     expect(selection.ok && selection.value.requiresFreshApproval).toBe(true);
   });
-});
 
+  it("enforces every approval decision and snapshot-role pair", () => {
+    const payload = Buffer.from("payload", "utf8");
+    const validPairs = [
+      ["approve-prepared", "prepared", "captured"],
+      ["keep-original", "captured", "captured"],
+      ["approve-selected", "current", "current"],
+      ["approve-selected", "both", "both"],
+      ["approve-merged", "merged", "editable-merge"]
+    ] as const;
+    for (const [decision, role, choice] of validPairs) {
+      const created = subject(payload, role, choice);
+      expect(created.ok).toBe(true);
+      if (!created.ok) continue;
+      expect(
+        approveReviewSubject({
+          subject: created.value,
+          payload,
+          decision
+        }).ok
+      ).toBe(true);
+    }
+    const mismatched = subject(payload, "captured", "captured");
+    expect(mismatched.ok).toBe(true);
+    if (!mismatched.ok) return;
+    expect(
+      approveReviewSubject({
+        subject: mismatched.value,
+        payload,
+        decision: "approve-merged"
+      }).ok
+    ).toBe(false);
+    const valid = approveReviewSubject({
+      subject: mismatched.value,
+      payload,
+      decision: "keep-original",
+      approvedAt: "2030-01-01T00:02:00.000Z"
+    });
+    expect(valid.ok).toBe(true);
+    if (!valid.ok) return;
+    const forgedUnsigned = {
+      approvalId: valid.value.approvalId,
+      runId: valid.value.runId,
+      reviewSubjectDigest: valid.value.reviewSubjectDigest,
+      approvedPayloadSha256: valid.value.approvedPayloadSha256,
+      decision: "reject" as const,
+      approvedAt: valid.value.approvedAt
+    };
+    expect(
+      validateApproval({
+        subject: mismatched.value,
+        approval: {
+          ...forgedUnsigned,
+          digest: canonicalJsonDigest(forgedUnsigned)
+        },
+        payload
+      }).ok
+    ).toBe(false);
+  });
+
+  it("rejects approval while evidence is missing and ambiguous sources", () => {
+    const payload = Buffer.from("payload", "utf8");
+    const created = subject(payload);
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    expect(
+      approveReviewSubject({
+        subject: {
+          ...created.value,
+          evidenceDecision: "gather-more-evidence"
+        },
+        payload,
+        decision: "approve-prepared"
+      }).ok
+    ).toBe(false);
+    expect(
+      reviewSubjectProvider.provide({
+        runId: "run-1",
+        payload,
+        sourceIdentities: [
+          {
+            sourceId: "duplicate",
+            identity: {
+              sha256: sha256Base64Url(Buffer.from("one")),
+              byteLength: 3
+            }
+          },
+          {
+            sourceId: "duplicate",
+            identity: {
+              sha256: sha256Base64Url(Buffer.from("two")),
+              byteLength: 3
+            }
+          }
+        ],
+        policyDigest: canonicalJsonDigest("policy"),
+        detectorRegistryDigest: canonicalJsonDigest("detectors"),
+        reviewProducerRegistry: {
+          digest: canonicalJsonDigest([]),
+          producers: []
+        },
+        readScopeDigest: canonicalJsonDigest({}),
+        evidenceDecision: "ready",
+        tokenizer: "o200k_base",
+        target: created.value.target,
+        snapshotChoice: "captured",
+        payloadRole: "prepared"
+      }).ok
+    ).toBe(false);
+  });
+});

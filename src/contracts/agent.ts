@@ -5,9 +5,12 @@ import type { PermissionEnvelope } from "./approval.js";
 import type { DeliverySlice } from "./source-scope.js";
 import type { EvidenceSpan } from "./types.js";
 import type { ProducerMetadata } from "./providers.js";
+import type { Result } from "../core/result.js";
 import type {
   ExternalSendAuthorization,
-  SecurityAssessment
+  SecurityAssessment,
+  ShareableRedactedView,
+  TrustClass
 } from "./security.js";
 
 export interface AgentReadScope {
@@ -19,6 +22,13 @@ export interface AgentReadScope {
   readonly sources: readonly DeliverySlice[];
 }
 
+export interface AgentRunScopeAuthority {
+  validate(
+    runId: string,
+    scope: AgentReadScope
+  ): Result<void>;
+}
+
 export interface ApprovedAgentSendRequest {
   readonly runId: string;
   readonly approved: ApprovedReviewPayload;
@@ -26,9 +36,15 @@ export interface ApprovedAgentSendRequest {
   readonly security: {
     readonly assessment: SecurityAssessment;
     readonly authorization: ExternalSendAuthorization;
+    readonly assessedSource: {
+      readonly sourceId: string;
+      readonly trustClass: TrustClass;
+      readonly bytes: Buffer;
+    };
+    readonly redactedView?: ShareableRedactedView;
+    readonly redactionHmacKey?: Buffer;
   };
   readonly timeoutMs: number;
-  readonly resumeSessionId?: string;
 }
 
 export interface AgentEventRecord {

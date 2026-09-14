@@ -284,6 +284,9 @@ byte-identical reconstruction.
 
 ```shell
 npm run check
+npm run check:full-capability
+npm run test:parity
+npm run demo:day0-5
 npm run test:unit
 npm run test:integration
 ```

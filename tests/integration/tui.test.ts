@@ -5,7 +5,10 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import type { ApprovalTarget } from "../../src/contracts/approval.js";
+import type { CurrentSourceReadPort } from "../../src/contracts/tui.js";
+import { sha256Base64Url } from "../../src/core/hash.js";
 import { prepareContext } from "../../src/pipeline/prepare.js";
+import { createEvidenceFact } from "../../src/obligations/evaluate.js";
 import { renderContext } from "../../src/render/render.js";
 import { ContextStore } from "../../src/storage/store.js";
 import {
@@ -31,15 +34,19 @@ const target: ApprovalTarget = {
   }
 };
 
-async function fixture() {
+async function fixture(
+  currentSource?: CurrentSourceReadPort,
+  promptText = "Fix the failure while summarizing this routine trace.",
+  contextText = "long repeated routine trace payload\n".repeat(100)
+) {
   const directory = mkdtempSync(join(tmpdir(), "ctxo-tui-"));
   const storePath = join(directory, "context.sqlite");
   const prepared = await prepareContext({
-    promptText: "Summarize this routine trace.",
+    promptText,
     contextTexts: [
       {
         label: "routine.log",
-        text: "long repeated routine trace payload\n".repeat(100)
+        text: contextText
       }
     ],
     storePath
@@ -64,8 +71,25 @@ async function fixture() {
     {
       contextPackage: verified.value,
       receipt: prepared.value.receipt,
-      originalBytes,
+      capturedBytes: originalBytes,
       artifacts: snapshots.value,
+      readScope: {
+        runId: verified.value.runId,
+        evidence: verified.value.manifest.evidence.map((evidence) => {
+          const artifact = snapshots.value.find(
+            (item) => item.artifactId === evidence.artifactId
+          ) as (typeof snapshots.value)[number];
+          return {
+            span: evidence,
+            bytes: artifact.bytes.subarray(
+              evidence.startByte,
+              evidence.endByte
+            )
+          };
+        }),
+        sources: []
+      },
+      ...(currentSource === undefined ? {} : { currentSource }),
       target
     },
     store
@@ -149,5 +173,120 @@ describe("terminal-first review TUI", () => {
       rmSync(value.directory, { recursive: true, force: true });
     }
   });
-});
 
+  it("recaptures current files and invalidates approval when they change during review", async () => {
+    let currentBytes = Buffer.from("current-one", "utf8");
+    let currentSourceId = "current-file";
+    const port: CurrentSourceReadPort = {
+      capture: () => ({
+        ok: true,
+        value: {
+          bytes: Buffer.from(currentBytes),
+          sourceIdentities: [
+            {
+              sourceId: currentSourceId,
+              identity: {
+                sha256: sha256Base64Url(currentBytes),
+                byteLength: currentBytes.length
+              }
+            }
+          ]
+        }
+      })
+    };
+    const value = await fixture(port);
+    try {
+      expect(
+        value.controller.dispatch({
+          type: "choose-snapshot",
+          choice: "current"
+        }).ok
+      ).toBe(true);
+      currentBytes = Buffer.from("current-two", "utf8");
+      expect(
+        value.controller.dispatch({ type: "approve-selected" }).ok
+      ).toBe(false);
+      expect(value.controller.approvedPayload().ok).toBe(false);
+
+      expect(
+        value.controller.dispatch({
+          type: "choose-snapshot",
+          choice: "current"
+        }).ok
+      ).toBe(true);
+      expect(
+        value.controller.dispatch({ type: "approve-selected" }).ok
+      ).toBe(true);
+      expect(value.controller.approvedPayload().ok).toBe(true);
+      currentSourceId = "renamed-current-file";
+      expect(value.controller.approvedPayload().ok).toBe(false);
+    } finally {
+      value.store.close();
+      rmSync(value.directory, { recursive: true, force: true });
+    }
+  });
+
+  it("persists gathered facts and re-evaluates gaps before approval", async () => {
+    const value = await fixture(
+      undefined,
+      "Fix the failure.",
+      [
+        "TypeError: broken",
+        "  at run (src/app.ts:2:3)",
+        "Process exited with code 1",
+        ""
+      ].join("\n")
+    );
+    try {
+      const gap = value.controller.view().gaps.find(
+        (item) => item.kind === "referenced-source"
+      );
+      expect(gap).toBeDefined();
+      expect(
+        value.controller.dispatch({ type: "approve-prepared" }).ok
+      ).toBe(false);
+      if (gap === undefined) return;
+      expect(
+        value.controller.dispatch({
+          type: "add-evidence-facts",
+          facts: [
+            createEvidenceFact({
+              obligationId: gap.obligationId,
+              kind: "referenced-source",
+              key: gap.key,
+              value: "exact source retrieved",
+              evidenceIds: ["retrieved-source"],
+              artifactId: "source-artifact",
+              startByte: 0,
+              endByte: Buffer.byteLength("exact source retrieved", "utf8"),
+              sha256: sha256Base64Url(
+                Buffer.from("exact source retrieved", "utf8")
+              ),
+              byteLength: Buffer.byteLength(
+                "exact source retrieved",
+                "utf8"
+              ),
+              origin: "bounded-retrieval"
+            })
+          ]
+        }).ok
+      ).toBe(true);
+      expect(value.controller.view().gaps).toHaveLength(0);
+      expect(
+        value.controller.dispatch({ type: "approve-prepared" }).ok
+      ).toBe(true);
+
+      const persisted = value.store.loadReviewFacts(
+        value.prepared.package.runId
+      );
+      expect(persisted.ok && persisted.value).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ obligationId: gap.obligationId })
+        ])
+      );
+    } finally {
+      value.store.close();
+      rmSync(value.directory, { recursive: true, force: true });
+    }
+  });
+});

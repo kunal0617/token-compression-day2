@@ -17,6 +17,7 @@ import {
   runTerminalReview,
   TerminalReviewController
 } from "./tui/review.js";
+import { LocalFileCurrentSourcePort } from "./tui/current-source.js";
 
 export const HELP = `Context Overflow POC
 
@@ -605,8 +606,30 @@ async function runReview(parsed: ParsedArgs, io: CliIo): Promise<number> {
       {
         contextPackage: verified.value,
         receipt: receipt.value,
-        originalBytes: original,
+        capturedBytes: original,
         artifacts: snapshots.value,
+        readScope: {
+          runId: verified.value.runId,
+          evidence: verified.value.manifest.evidence.map((evidence) => {
+            const artifact = snapshots.value.find(
+              (item) => item.artifactId === evidence.artifactId
+            );
+            if (artifact === undefined) {
+              throw new Error(
+                `Evidence artifact is missing: ${evidence.artifactId}`
+              );
+            }
+            return {
+              span: evidence,
+              bytes: artifact.bytes.subarray(
+                evidence.startByte,
+                evidence.endByte
+              )
+            };
+          }),
+          sources: []
+        },
+        currentSource: new LocalFileCurrentSourcePort(snapshots.value),
         target: {
           adapterId: adapter.value ?? "offline",
           ...(session.value === undefined

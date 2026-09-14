@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { ModelCatalogEntry } from "../../src/contracts/agent.js";
+import { canonicalJsonDigest } from "../../src/core/canonical.js";
 import {
   createCuratedModelPolicy,
   deterministicModelFitAdviser
@@ -65,6 +66,17 @@ const policy = createCuratedModelPolicy({
     }
   ]
 });
+
+const baseRequest = {
+  operation: "MF-02-bounded-routine" as const,
+  currentModelId: "exact-fast",
+  requiredInputTokens: 1_000,
+  requiresTools: true,
+  requiresVision: false,
+  evidenceDecision: "ready" as const,
+  catalog,
+  policy
+};
 
 describe("MF-01/MF-02/MF-03 deterministic model fit", () => {
   it("keeps a capable current model for exact operations", () => {
@@ -163,6 +175,7 @@ describe("MF-01/MF-02/MF-03 deterministic model fit", () => {
     if (!advice.ok) return;
     expect(advice.value.decision).toBe("keep-current");
     expect(advice.value.reasons[0]).toContain("No catalog model");
+    expect(advice.value.scores[0]?.eligible).toBe(false);
   });
 
   it("canonicalizes curated policy order and digest", () => {
@@ -173,5 +186,75 @@ describe("MF-01/MF-02/MF-03 deterministic model fit", () => {
     expect(reversed.digest).toBe(policy.digest);
     expect(reversed.entries).toEqual(policy.entries);
   });
-});
 
+  it("keeps the current model for stale policy, catalog uncertainty, or score ties", () => {
+    expect(
+      deterministicModelFitAdviser.provide({
+        ...baseRequest,
+        policy: { ...policy, digest: canonicalJsonDigest("stale") }
+      }).ok
+    ).toBe(false);
+
+    const unknownCurrent = deterministicModelFitAdviser.provide({
+      ...baseRequest,
+      currentModelId: "missing-model"
+    });
+    expect(unknownCurrent.ok).toBe(true);
+    if (unknownCurrent.ok) {
+      expect(unknownCurrent.value.decision).toBe("keep-current");
+    }
+
+    const tiedCatalog: ModelCatalogEntry[] = [
+      {
+        id: "top-a",
+        name: "Top A",
+        capabilities: {
+          maxInputTokens: 64_000,
+          supportsTools: true,
+          latencyTier: 1,
+          costTier: 1
+        }
+      },
+      {
+        id: "top-b",
+        name: "Top B",
+        capabilities: {
+          maxInputTokens: 64_000,
+          supportsTools: true,
+          latencyTier: 1,
+          costTier: 1
+        }
+      },
+      {
+        id: "current",
+        name: "Current",
+        capabilities: {
+          maxInputTokens: 64_000,
+          supportsTools: true,
+          latencyTier: 5,
+          costTier: 5
+        }
+      }
+    ];
+    const tiedPolicy = createCuratedModelPolicy({
+      version: "tie",
+      entries: tiedCatalog.map((model) => ({
+        modelId: model.id,
+        allowedOperations: [
+          "MF-01-exact-operation",
+          "MF-02-bounded-routine",
+          "MF-03-reasoning-intensive"
+        ],
+        enabled: true
+      }))
+    });
+    const tied = deterministicModelFitAdviser.provide({
+      ...baseRequest,
+      catalog: tiedCatalog,
+      policy: tiedPolicy,
+      currentModelId: "current"
+    });
+    expect(tied.ok).toBe(true);
+    if (tied.ok) expect(tied.value.decision).toBe("keep-current");
+  });
+});

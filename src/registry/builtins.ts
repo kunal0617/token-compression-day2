@@ -53,6 +53,7 @@ import {
 import { typeScriptSemanticEdgeProvider } from "../source/typescript-semantic.js";
 import { reviewSubjectProvider } from "../approval/review.js";
 import { optionalCopilotSdkAdapter } from "../adapters/copilot-sdk.js";
+import { deterministicModelFitAdviser } from "../model/advice.js";
 import { segmentArtifact } from "../segment/segment.js";
 import { VersionedRegistry } from "./registry.js";
 import {
@@ -266,6 +267,7 @@ export function createBuiltinRuntime(): BuiltinRuntime {
     | typeof typeScriptSemanticEdgeProvider
     | typeof reviewSubjectProvider
     | typeof optionalCopilotSdkAdapter
+    | typeof deterministicModelFitAdviser
   >();
   const preparation = [
     artifactClassifier,
@@ -301,6 +303,8 @@ export function createBuiltinRuntime(): BuiltinRuntime {
     reviewSubjectProvider
     ,
     optionalCopilotSdkAdapter
+    ,
+    deterministicModelFitAdviser
   ]) {
     const registered = registry.register(producer);
     if (!registered.ok) throw new Error(registered.error.message);

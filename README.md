@@ -188,6 +188,18 @@ returning failure.
 created a session with model `auto`, sent the exact approved hash, and received
 `CONTEXT_OVERFLOW_SMOKE_OK`.
 
+## MF-01/MF-02/MF-03 model-fit advice
+
+The SDK catalog feeds a versioned curated policy and deterministic hard
+filters. MF-01 covers exact operations, MF-02 bounded routine work, and MF-03
+reasoning-intensive work. Advice reports every model's eligibility, score, and
+reasons.
+
+Missing evidence always vetoes routing. Unknown/conflicting capabilities keep
+the current model. A different recommendation is advisory and always requires
+an explicitly approved new session; the adviser never silently switches the
+current session or uses learned routing.
+
 For CI summary logs, routine path/version/timestamp/identifier occurrences stay
 in the manifest but do not automatically protect neighboring lines. Source
 locations require credible file extensions or diagnostic/stack/compiler

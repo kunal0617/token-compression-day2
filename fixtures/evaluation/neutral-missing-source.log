@@ -1,0 +1,7 @@
+FAIL missing source
+AssertionError: value differs
+Expected: enabled
+Actual: disabled
+  at loadConfig (src/missing-config.ts:42:3)
+Process exited with code 1
+

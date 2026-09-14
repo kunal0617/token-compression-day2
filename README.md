@@ -241,6 +241,15 @@ explicit external root and never vendor private fixtures. See the
 [evaluation method](docs/evaluation-method.md) and
 [external fixture instructions](docs/external-fixtures.md).
 
+## Integrated Day0-5 demo
+
+`npm run demo:day0-5` creates an ignored SQLite run and JSON bundle covering
+intake through paired evaluation: reduction/verification, typed parsing,
+obligations, exact provenance, source closure, model advice, TUI approval,
+security, offline handoff, and A/B statistics. A sanitized recorded fallback is
+available at `fixtures/demo/recorded-fallback.json`. See the
+[demo guide](docs/demo-guide.md).
+
 For CI summary logs, routine path/version/timestamp/identifier occurrences stay
 in the manifest but do not automatically protect neighboring lines. Source
 locations require credible file extensions or diagnostic/stack/compiler

@@ -1,0 +1,7 @@
+FAIL test alpha
+TypeError: alpha changed
+  at alpha (src/a.ts:10:2)
+FAIL test beta
+TypeError: beta changed
+  at beta (src/b.ts:20:4)
+

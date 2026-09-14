@@ -44,6 +44,7 @@ hashes, slicing, mappings, retrieval, and reconstruction use original bytes.
 | `helper` | Optional additive-only gap/query suggestions with strict schemas, budgets, isolation, and no-op failures | Isolated transport adapters |
 | `security` | Trust classes, local secret/injection assessment, shareable redaction, and external-send authorization | Pure policy + crypto |
 | `evaluation` | Opt-in matched A/B trials, replay manifests, scoring, statistics, reports, and external adapters | Evaluation ports + process adapter |
+| `scripts/day0-5-demo` | Integrated offline preparation-to-evaluation bundle | Reproducible demo adapter |
 | `segment` / `protect` | Structural lines and protected closure | Pure |
 | `reduce` | Proposals, benefit checks, and overlap resolution | Pure |
 | `render` | One compact render and mapping creation | Pure |

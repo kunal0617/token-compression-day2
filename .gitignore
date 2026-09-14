@@ -5,5 +5,5 @@ coverage/
 *.sqlite-shm
 *.sqlite-wal
 *.log
-!fixtures/*.log
+!fixtures/**/*.log
 .context-overflow/

@@ -46,6 +46,11 @@ import {
   evidenceObligationEvaluator,
   gatherMoreEvidencePolicy
 } from "../obligations/evaluate.js";
+import {
+  conservativeFileStructureProvider,
+  treeSitterJsTsStructureProvider
+} from "../source/tree-sitter.js";
+import { typeScriptSemanticEdgeProvider } from "../source/typescript-semantic.js";
 import { segmentArtifact } from "../segment/segment.js";
 import { VersionedRegistry } from "./registry.js";
 
@@ -250,6 +255,9 @@ export function createBuiltinRuntime(): BuiltinRuntime {
     | typeof conservativeFailureFallbackDetector
     | typeof evidenceObligationEvaluator
     | typeof gatherMoreEvidencePolicy
+    | typeof treeSitterJsTsStructureProvider
+    | typeof conservativeFileStructureProvider
+    | typeof typeScriptSemanticEdgeProvider
   >();
   for (const producer of [
     artifactClassifier,
@@ -268,6 +276,10 @@ export function createBuiltinRuntime(): BuiltinRuntime {
     ,
     evidenceObligationEvaluator,
     gatherMoreEvidencePolicy
+    ,
+    treeSitterJsTsStructureProvider,
+    conservativeFileStructureProvider,
+    typeScriptSemanticEdgeProvider
   ]) {
     const registered = registry.register(producer);
     if (!registered.ok) throw new Error(registered.error.message);

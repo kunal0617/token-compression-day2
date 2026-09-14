@@ -132,6 +132,19 @@ expected/actual values, referenced source, command/exit, runtime facts, and
 summaries. Retrieval requests are adapter-scoped and bounded by request count,
 byte limit, and valid ranges.
 
+## CQ-05 JS/TS source scope
+
+Tree-sitter providers extract JavaScript/TypeScript/TSX/JSX functions, classes,
+interfaces, types, imports, exports, methods, variables, and tests. Binding
+indices are converted through UTF-8 byte length before any slice or hash, so
+Unicode source remains byte-precise.
+
+The TypeScript compiler provider adds provided-file-only import, definition,
+type, and test edges. `DeliveryRules` and `buildDeliveryPlan` apply explicit
+file/byte/depth bounds to symbol/range/file roots and omit unrelated source. An
+optional LSP semantic port is defined, while other languages use a conservative
+exact whole-file fallback.
+
 For CI summary logs, routine path/version/timestamp/identifier occurrences stay
 in the manifest but do not automatically protect neighboring lines. Source
 locations require credible file extensions or diagnostic/stack/compiler

@@ -18,8 +18,12 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "fast-check": "^4.9.0",
     "typescript": "^5.7.2",
-    "vitest": "^2.1.8"
+    "vitest": "^3.2.4"
+  },
+  "dependencies": {
+    "js-tiktoken": "^1.0.21",
+    "zod": "^4.5.4"
   }
 }
-

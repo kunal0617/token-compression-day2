@@ -37,6 +37,7 @@ hashes, slicing, mappings, retrieval, and reconstruction use original bytes.
 | `parsers` | CQ-02 typed Vitest/Jest and Node/V8 failures with conservative fallback | Pure detectors |
 | `obligations` | CQ-03/CQ-06 explicit sufficiency statuses and bounded Gather More Evidence policy | Pure evaluator + retrieval ports |
 | `source` | CQ-05 Tree-sitter units, TypeScript semantic edges, bounded delivery planning, and language fallback | Pure providers |
+| `approval` | CQ-07 captured/current selection, diff3 merge, canonical review subject, and stale approval rejection | Pure state transition |
 | `segment` / `protect` | Structural lines and protected closure | Pure |
 | `reduce` | Proposals, benefit checks, and overlap resolution | Pure |
 | `render` | One compact render and mapping creation | Pure |

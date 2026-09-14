@@ -145,6 +145,18 @@ file/byte/depth bounds to symbol/range/file roots and omit unrelated source. An
 optional LSP semantic port is defined, while other languages use a conservative
 exact whole-file fallback.
 
+## CQ-07 snapshot review and approval
+
+Captured/current snapshot comparison supports `captured`, `current`, `both`,
+`editable-merge`, and `cancel`. Diff3-style conflicts are explicit and every
+editable merge requires a fresh approval.
+
+The canonical `ReviewSubject` digest binds payload bytes, source identities,
+policy, detector registry, tokenizer, target adapter/session/model, working
+directory, permission envelope, and snapshot choice. Approval records bind that
+digest and approved payload hash. Any source, payload, policy, target, model,
+directory, permission, or selection change invalidates the approval.
+
 For CI summary logs, routine path/version/timestamp/identifier occurrences stay
 in the manifest but do not automatically protect neighboring lines. Source
 locations require credible file extensions or diagnostic/stack/compiler

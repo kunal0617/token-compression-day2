@@ -51,6 +51,7 @@ import {
   treeSitterJsTsStructureProvider
 } from "../source/tree-sitter.js";
 import { typeScriptSemanticEdgeProvider } from "../source/typescript-semantic.js";
+import { reviewSubjectProvider } from "../approval/review.js";
 import { segmentArtifact } from "../segment/segment.js";
 import { VersionedRegistry } from "./registry.js";
 
@@ -258,6 +259,7 @@ export function createBuiltinRuntime(): BuiltinRuntime {
     | typeof treeSitterJsTsStructureProvider
     | typeof conservativeFileStructureProvider
     | typeof typeScriptSemanticEdgeProvider
+    | typeof reviewSubjectProvider
   >();
   for (const producer of [
     artifactClassifier,
@@ -280,6 +282,8 @@ export function createBuiltinRuntime(): BuiltinRuntime {
     treeSitterJsTsStructureProvider,
     conservativeFileStructureProvider,
     typeScriptSemanticEdgeProvider
+    ,
+    reviewSubjectProvider
   ]) {
     const registered = registry.register(producer);
     if (!registered.ok) throw new Error(registered.error.message);

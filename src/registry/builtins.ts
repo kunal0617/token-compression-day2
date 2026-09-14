@@ -32,6 +32,10 @@ import { success, type Result } from "../core/result.js";
 import { extractEvidence } from "../evidence/extract.js";
 import { planTransforms } from "../reduce/planner.js";
 import { proposeTransforms } from "../reduce/propose.js";
+import {
+  exactSourceProvenanceProvider,
+  localApprovedSourceAdapter
+} from "../provenance/exact.js";
 import { segmentArtifact } from "../segment/segment.js";
 import { VersionedRegistry } from "./registry.js";
 
@@ -229,6 +233,8 @@ export function createBuiltinRuntime(): BuiltinRuntime {
     | SegmentProvider
     | ReductionDetector
     | ReductionPolicy
+    | typeof exactSourceProvenanceProvider
+    | typeof localApprovedSourceAdapter
   >();
   for (const producer of [
     artifactClassifier,
@@ -237,7 +243,9 @@ export function createBuiltinRuntime(): BuiltinRuntime {
     evidenceDetector,
     segmentProvider,
     reductionDetector,
-    reductionPolicy
+    reductionPolicy,
+    exactSourceProvenanceProvider,
+    localApprovedSourceAdapter
   ]) {
     const registered = registry.register(producer);
     if (!registered.ok) throw new Error(registered.error.message);
@@ -257,4 +265,3 @@ export function createBuiltinRuntime(): BuiltinRuntime {
 }
 
 export const builtinRuntime = createBuiltinRuntime();
-

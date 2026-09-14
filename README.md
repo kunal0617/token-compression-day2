@@ -99,6 +99,18 @@ exception types, test names, expected/actual values, source locations,
 versions, configuration keys, and command arguments are never broadly masked.
 All folded originals remain retrievable.
 
+## CQ-01 exact source provenance
+
+Approved source candidates are captured as raw bytes with a full snapshot
+identity. Exact `Buffer` search enumerates every overlapping occurrence and
+returns explicit `no-match`, `unique`, or `ambiguous` state. Only a unique exact
+match can render a source link. Fuzzy or normalized text is never authoritative.
+
+When requested, the local source adapter binds the snapshot to Git repository
+root, commit, tree, blob, repository path, mode, and whether current worktree
+bytes still equal the blob. Any candidate-byte mutation invalidates the
+provenance result.
+
 For CI summary logs, routine path/version/timestamp/identifier occurrences stay
 in the manifest but do not automatically protect neighboring lines. Source
 locations require credible file extensions or diagnostic/stack/compiler

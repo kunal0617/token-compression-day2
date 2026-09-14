@@ -33,6 +33,7 @@ hashes, slicing, mappings, retrieval, and reconstruction use original bytes.
 | `classify` | Deterministic artifact, intent, and artifact-local outcome reasons | Pure |
 | `evidence` | Exact occurrence extraction and hashes | Pure |
 | `ci` | Analysis-only timestamp/ANSI envelopes, CI criticality, and missing-evidence detection | Pure |
+| `provenance` | CQ-01 approved-candidate exact occurrence enumeration and optional Git object identity | Pure matcher + explicit local adapter |
 | `segment` / `protect` | Structural lines and protected closure | Pure |
 | `reduce` | Proposals, benefit checks, and overlap resolution | Pure |
 | `render` | One compact render and mapping creation | Pure |

@@ -35,6 +35,7 @@ hashes, slicing, mappings, retrieval, and reconstruction use original bytes.
 | `ci` | Analysis-only timestamp/ANSI envelopes, CI criticality, and missing-evidence detection | Pure |
 | `provenance` | CQ-01 approved-candidate exact occurrence enumeration and optional Git object identity | Pure matcher + explicit local adapter |
 | `parsers` | CQ-02 typed Vitest/Jest and Node/V8 failures with conservative fallback | Pure detectors |
+| `obligations` | CQ-03/CQ-06 explicit sufficiency statuses and bounded Gather More Evidence policy | Pure evaluator + retrieval ports |
 | `segment` / `protect` | Structural lines and protected closure | Pure |
 | `reduce` | Proposals, benefit checks, and overlap resolution | Pure |
 | `render` | One compact render and mapping creation | Pure |

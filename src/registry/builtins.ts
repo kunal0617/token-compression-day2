@@ -42,6 +42,10 @@ import {
   typedFailureParsers,
   vitestJestFailureDetector
 } from "../parsers/failures.js";
+import {
+  evidenceObligationEvaluator,
+  gatherMoreEvidencePolicy
+} from "../obligations/evaluate.js";
 import { segmentArtifact } from "../segment/segment.js";
 import { VersionedRegistry } from "./registry.js";
 
@@ -244,6 +248,8 @@ export function createBuiltinRuntime(): BuiltinRuntime {
     | typeof vitestJestFailureDetector
     | typeof nodeV8FailureDetector
     | typeof conservativeFailureFallbackDetector
+    | typeof evidenceObligationEvaluator
+    | typeof gatherMoreEvidencePolicy
   >();
   for (const producer of [
     artifactClassifier,
@@ -259,6 +265,9 @@ export function createBuiltinRuntime(): BuiltinRuntime {
     vitestJestFailureDetector,
     nodeV8FailureDetector,
     conservativeFailureFallbackDetector
+    ,
+    evidenceObligationEvaluator,
+    gatherMoreEvidencePolicy
   ]) {
     const registered = registry.register(producer);
     if (!registered.ok) throw new Error(registered.error.message);

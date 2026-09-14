@@ -120,6 +120,18 @@ completeness. Unrecognized formats return a conservative raw-range fallback
 with `recognized: false` and `completeness: unknown`; they never become an
 empty success.
 
+## CQ-03/CQ-06 evidence obligations
+
+Evidence sufficiency is represented as explicit obligations, never a scalar
+model confidence. Each obligation is `satisfied`, `missing`, `ambiguous`,
+`contradicted`, or `stale`. Unresolved obligations deterministically produce a
+high-priority Gather More Evidence decision before delivery.
+
+Failure reports generate obligations for complete failure blocks,
+expected/actual values, referenced source, command/exit, runtime facts, and
+summaries. Retrieval requests are adapter-scoped and bounded by request count,
+byte limit, and valid ranges.
+
 For CI summary logs, routine path/version/timestamp/identifier occurrences stay
 in the manifest but do not automatically protect neighboring lines. Source
 locations require credible file extensions or diagnostic/stack/compiler

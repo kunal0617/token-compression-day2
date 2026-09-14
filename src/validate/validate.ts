@@ -1,8 +1,3 @@
-import {
-  classifyArtifact,
-  classifyIntent,
-  determineOutcome
-} from "../classify/classify.js";
 import { canonicalManifestSchema } from "../contracts/schemas.js";
 import type {
   ArtifactSnapshot,
@@ -16,13 +11,11 @@ import { canonicalJson } from "../core/canonical.js";
 import { sha256Base64Url } from "../core/hash.js";
 import { assertRange, rangesIntersect } from "../core/ranges.js";
 import { failure, success, type Result } from "../core/result.js";
-import { extractEvidence } from "../evidence/extract.js";
 import { buildProtectedRanges } from "../protect/protect.js";
+import { builtinRuntime } from "../registry/builtins.js";
 import { buildReceipt } from "../receipt/receipt.js";
-import { planTransforms } from "../reduce/planner.js";
-import { proposeTransforms } from "../reduce/propose.js";
 import { renderContext } from "../render/render.js";
-import { segmentArtifact, splitRawLines } from "../segment/segment.js";
+import { splitRawLines } from "../segment/segment.js";
 import { parseHandle } from "../storage/handles.js";
 import { measureTokens } from "../token/tokenizer.js";
 import type { ValidationStore } from "./store-port.js";
@@ -122,6 +115,34 @@ export function validateContextPackage(input: {
       issues: parsedManifest.error.issues.map((issue) => issue.message)
     });
   }
+  const storedProducers =
+    phase === "staging"
+      ? store.loadRunProducersForValidation(contextPackage.runId)
+      : store.loadRunProducers(contextPackage.runId);
+  if (!storedProducers.ok) return storedProducers;
+  if (manifest.formatVersion === 2) {
+    if (
+      manifest.producerRegistry === undefined ||
+      manifest.producerRegistry.digest !== builtinRuntime.registryDigest ||
+      canonicalJson(manifest.producerRegistry.producers) !==
+        canonicalJson(builtinRuntime.producers) ||
+      canonicalJson(storedProducers.value) !==
+        canonicalJson(builtinRuntime.producers)
+    ) {
+      return failure(
+        "INTEGRITY_ERROR",
+        "Producer registry does not match the validated runtime"
+      );
+    }
+  } else if (
+    manifest.producerRegistry !== undefined ||
+    storedProducers.value.length > 0
+  ) {
+    return failure(
+      "INTEGRITY_ERROR",
+      "Legacy manifest contains unexpected producer metadata"
+    );
+  }
 
   if (
     canonicalJson(manifest) !== contextPackage.manifestJson ||
@@ -219,19 +240,31 @@ export function validateContextPackage(input: {
   if (prompt === undefined) {
     return failure("INTEGRITY_ERROR", "Manifest has no prompt artifact");
   }
-  const recomputedClassifications = artifacts.map(classifyArtifact);
+  const recomputedClassifications = [];
+  for (const artifact of artifacts) {
+    const classification = builtinRuntime.classifyArtifact(artifact);
+    if (!classification.ok) return classification;
+    recomputedClassifications.push(classification.value);
+  }
   const recomputedClassificationMap = new Map(
     recomputedClassifications.map((classification) => [
       classification.artifactId,
       classification
     ])
   );
-  const recomputedArtifactOutcomes = new Map(
-    artifacts.map((artifact) => [
-      artifact.artifactId,
-      artifact.role === "prompt" ? "unknown" : determineOutcome([artifact])
-    ])
-  );
+  const recomputedArtifactOutcomes = new Map<
+    string,
+    "green" | "red" | "unknown"
+  >();
+  for (const artifact of artifacts) {
+    if (artifact.role === "prompt") {
+      recomputedArtifactOutcomes.set(artifact.artifactId, "unknown");
+      continue;
+    }
+    const detected = builtinRuntime.detectOutcome(artifact);
+    if (!detected.ok) return detected;
+    recomputedArtifactOutcomes.set(artifact.artifactId, detected.value);
+  }
   const contextOutcomes = artifacts
     .filter((artifact) => artifact.role === "context")
     .map(
@@ -244,46 +277,55 @@ export function validateContextPackage(input: {
         contextOutcomes.every((outcome) => outcome === "green")
       ? "green"
       : "unknown";
-  const recomputedEvidence = artifacts.flatMap((artifact) => {
+  const recomputedEvidence = [];
+  for (const artifact of artifacts) {
     const classification = recomputedClassificationMap.get(
       artifact.artifactId
     );
-    return classification === undefined
-      ? []
-      : extractEvidence(
-          artifact,
-          classification,
-          recomputedArtifactOutcomes.get(artifact.artifactId) ?? "unknown"
-        );
-  });
-  const recomputedProtected = artifacts.flatMap((artifact) =>
-    buildProtectedRanges(
+    if (classification === undefined) continue;
+    const detected = builtinRuntime.detectEvidence({
+      artifact,
+      classification,
+      outcome:
+        recomputedArtifactOutcomes.get(artifact.artifactId) ?? "unknown"
+    });
+    if (!detected.ok) return detected;
+    recomputedEvidence.push(...detected.value.findings);
+  }
+  const recomputedProtected = [];
+  const recomputedTransforms = [];
+  for (const artifact of artifacts) {
+    const classification = recomputedClassificationMap.get(
+      artifact.artifactId
+    );
+    if (classification === undefined) continue;
+    const segmented = builtinRuntime.segment(artifact);
+    if (!segmented.ok) return segmented;
+    const artifactProtected = buildProtectedRanges(
       artifact,
       recomputedEvidence.filter(
         (item) => item.artifactId === artifact.artifactId
       ),
-      segmentArtifact(artifact),
+      segmented.value,
       { nearbySegments: manifest.policy.nearbySegments }
-    )
-  );
-  const recomputedTransforms = artifacts.flatMap((artifact) => {
-    const classification = recomputedClassificationMap.get(
-      artifact.artifactId
     );
-    if (classification === undefined) return [];
-    return planTransforms(
-      contextPackage.runId,
+    recomputedProtected.push(...artifactProtected);
+    const detectedReductions = builtinRuntime.detectReductions({
       artifact,
-      proposeTransforms(
-        artifact,
-        classification,
+      classification,
+      outcome:
         recomputedArtifactOutcomes.get(artifact.artifactId) ?? "unknown"
-      ),
-      recomputedProtected.filter(
-        (range) => range.artifactId === artifact.artifactId
-      )
-    ).selected;
-  });
+    });
+    if (!detectedReductions.ok) return detectedReductions;
+    const decision = builtinRuntime.plan({
+      runId: contextPackage.runId,
+      artifact,
+      proposals: detectedReductions.value.findings,
+      protectedRanges: artifactProtected
+    });
+    if (!decision.ok) return decision;
+    recomputedTransforms.push(...(decision.value.value ?? []));
+  }
   const manifestArtifactSemantics = manifest.artifacts.map((artifact) => ({
     artifactId: artifact.artifactId,
     classification: artifact.classification,
@@ -296,7 +338,14 @@ export function validateContextPackage(input: {
       recomputedArtifactOutcomes.get(artifact.artifactId) ?? "unknown"
   }));
   if (
-    canonicalJson(manifest.intent) !== canonicalJson(classifyIntent(prompt)) ||
+    (() => {
+      const recomputedIntent = builtinRuntime.classifyIntent(prompt);
+      return (
+        !recomputedIntent.ok ||
+        canonicalJson(manifest.intent) !==
+          canonicalJson(recomputedIntent.value)
+      );
+    })() ||
     manifest.outcome !== recomputedOutcome ||
     canonicalJson(manifestArtifactSemantics) !==
       canonicalJson(recomputedArtifactSemantics) ||

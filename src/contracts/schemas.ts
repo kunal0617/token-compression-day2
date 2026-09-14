@@ -4,6 +4,24 @@ const byteIndex = z.number().int().nonnegative();
 const sha256Base64UrlSchema = z
   .string()
   .regex(/^[A-Za-z0-9_-]{43}$/, "Expected full SHA-256 base64url digest");
+const producerMetadataSchema = z
+  .object({
+    producerId: z.string().min(1),
+    kind: z.enum([
+      "feature-provider",
+      "detector",
+      "policy-rule",
+      "source-adapter",
+      "code-structure",
+      "semantic-edge",
+      "coding-agent",
+      "helper-model",
+      "evaluation"
+    ]),
+    version: z.string().min(1),
+    digest: sha256Base64UrlSchema
+  })
+  .strict();
 const byteRangeSchema = z
   .object({
     startByte: byteIndex,
@@ -199,7 +217,7 @@ const tokenMeasurementSchema = z
 
 export const canonicalManifestSchema = z
   .object({
-    formatVersion: z.literal(1),
+    formatVersion: z.union([z.literal(1), z.literal(2)]),
     runId: z.string().min(1),
     createdAt: z.string().datetime(),
     artifacts: z.array(artifactManifestSchema),
@@ -210,6 +228,13 @@ export const canonicalManifestSchema = z
         nearbySegments: z.number().int().nonnegative()
       })
       .strict(),
+    producerRegistry: z
+      .object({
+        digest: sha256Base64UrlSchema,
+        producers: z.array(producerMetadataSchema)
+      })
+      .strict()
+      .optional(),
     evidence: z.array(evidenceSchema),
     protectedRanges: z.array(protectedRangeSchema),
     transforms: z.array(plannedTransformSchema),

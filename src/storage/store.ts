@@ -8,6 +8,9 @@ import {
   contextReceiptSchema
 } from "../contracts/schemas.js";
 import type {
+  ProducerMetadata,
+} from "../contracts/providers.js";
+import type {
   ArtifactClassification,
   ArtifactSnapshot,
   CanonicalManifest,
@@ -247,6 +250,16 @@ export class ContextStore {
         digest TEXT NOT NULL UNIQUE,
         FOREIGN KEY(run_id) REFERENCES runs(run_id) ON DELETE CASCADE
       ) STRICT;
+
+      CREATE TABLE IF NOT EXISTS run_producers (
+        run_id TEXT NOT NULL,
+        producer_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        version TEXT NOT NULL,
+        digest TEXT NOT NULL,
+        PRIMARY KEY(run_id, producer_id),
+        FOREIGN KEY(run_id) REFERENCES runs(run_id) ON DELETE CASCADE
+      ) STRICT;
     `);
     const runColumns = this.#database
       .prepare("PRAGMA table_info(runs)")
@@ -482,6 +495,22 @@ export class ContextStore {
             mapping.outputStartByte,
             mapping.outputEndByte,
             mapping.sha256
+          );
+      }
+
+      for (const producer of input.manifest.producerRegistry?.producers ?? []) {
+        this.#database
+          .prepare(
+            `INSERT INTO run_producers(
+              run_id, producer_id, kind, version, digest
+            ) VALUES (?, ?, ?, ?, ?)`
+          )
+          .run(
+            input.runId,
+            producer.producerId,
+            producer.kind,
+            producer.version,
+            producer.digest
           );
       }
 
@@ -807,6 +836,52 @@ export class ContextStore {
       );
     } catch (error) {
       return failure("STORAGE_ERROR", "Unable to load artifact bytes", {
+        runId,
+        cause: errorMessage(error)
+      });
+    }
+  }
+
+  loadRunProducers(runId: string): Result<readonly ProducerMetadata[]> {
+    return this.#loadRunProducersByState(runId, "committed");
+  }
+
+  loadRunProducersForValidation(
+    runId: string
+  ): Result<readonly ProducerMetadata[]> {
+    return this.#loadRunProducersByState(runId, "staging");
+  }
+
+  #loadRunProducersByState(
+    runId: string,
+    state: "staging" | "committed"
+  ): Result<readonly ProducerMetadata[]> {
+    const validationStatus = state === "staging" ? "pending" : "validated";
+    try {
+      const rows = this.#database
+        .prepare(
+          `SELECT p.producer_id, p.kind, p.version, p.digest
+           FROM run_producers p
+           JOIN runs r ON r.run_id=p.run_id
+           WHERE p.run_id=? AND r.status=? AND r.validation_status=?
+           ORDER BY p.producer_id`
+        )
+        .all(runId, state, validationStatus) as unknown as {
+        producer_id: string;
+        kind: ProducerMetadata["kind"];
+        version: string;
+        digest: string;
+      }[];
+      return success(
+        rows.map((row) => ({
+          producerId: row.producer_id,
+          kind: row.kind,
+          version: row.version,
+          digest: row.digest
+        }))
+      );
+    } catch (error) {
+      return failure("STORAGE_ERROR", "Unable to load run producers", {
         runId,
         cause: errorMessage(error)
       });

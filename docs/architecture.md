@@ -28,6 +28,7 @@ hashes, slicing, mappings, retrieval, and reconstruction use original bytes.
 | Area | Responsibility | Dependency boundary |
 |---|---|---|
 | `contracts` | Serializable domain contracts and Zod schemas | No filesystem or SQLite |
+| `registry` | Versioned feature/detector/policy/adaptor registries and deterministic registry digest | Pure |
 | `intake` | Raw-byte capture, canonical paths, UTF-8 and metadata | Filesystem adapter |
 | `classify` | Deterministic artifact, intent, and artifact-local outcome reasons | Pure |
 | `evidence` | Exact occurrence extraction and hashes | Pure |
@@ -69,6 +70,20 @@ Classifiers, extractors, segments, protected closure, proposals, overlap
 ranking, markers, and mappings are source-derived. A run UUID and creation time
 identify an execution, so canonical manifests from separate executions are not
 expected to have the same digest even when the deterministic plan is equal.
+
+## Versioned producers
+
+Feature providers, detectors, policy rules, source adapters, code-structure
+providers, semantic-edge providers, coding-agent adapters, helper-model
+adapters, and evaluation adapters share immutable producer metadata:
+`producerId`, kind, semantic version, and a full digest of the declared
+contract/rule set. Detectors emit findings only; the deterministic policy layer
+turns reduction findings into a final non-overlapping plan.
+
+New runs use manifest format v2 and persist the complete sorted producer set in
+both the canonical manifest and `run_producers`. Validation recomputes the
+built-in registry digest and checks the staged/committed rows. Legacy v1 runs
+contain no producer registry and remain supported without fabricating metadata.
 
 Outcomes are computed per context artifact. Red wins the aggregate receipt;
 green plus unknown aggregates to unknown, and green-only reduction rules apply

@@ -53,6 +53,10 @@ provider. Its provider-neutral handoff port accepts only a
   the write lock rather than trusting caller-held snapshots.
 - Receipts are canonical, hashed, run-bound, rebuilt from the manifest, and
   checked again by stored-run verification.
+- Classification, evidence, segmentation, reduction, and policy are routed
+  through versioned producer registries. V2 manifests persist producer IDs,
+  semantic versions, full digests, and a registry digest; V1 stored runs remain
+  verifiable through an explicit migration path.
 
 See [architecture](docs/architecture.md) and the
 [integrity model](docs/integrity-model.md). A source-backed

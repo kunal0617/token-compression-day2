@@ -1,10 +1,5 @@
 import { randomUUID } from "node:crypto";
 
-import {
-  classifyArtifact,
-  classifyIntent,
-  determineOutcome
-} from "../classify/classify.js";
 import { detectMissingCiFailureEvidence } from "../ci/envelope.js";
 import type {
   ArtifactManifest,
@@ -16,21 +11,17 @@ import type {
 import { canonicalJson } from "../core/canonical.js";
 import { sha256Base64Url } from "../core/hash.js";
 import { failure, success, type Result } from "../core/result.js";
-import { extractEvidence } from "../evidence/extract.js";
 import {
   DEFAULT_MAX_ARTIFACT_BYTES,
   intakePastedText,
   intakeUtf8File
 } from "../intake/intake.js";
 import { buildProtectedRanges } from "../protect/protect.js";
+import { builtinRuntime } from "../registry/builtins.js";
 import { buildReceipt } from "../receipt/receipt.js";
-import { proposeTransforms } from "../reduce/propose.js";
-import { planTransforms } from "../reduce/planner.js";
 import { renderContext } from "../render/render.js";
-import { segmentArtifact } from "../segment/segment.js";
 import { ContextStore } from "../storage/store.js";
 import { measureTokens } from "../token/tokenizer.js";
-import { validateContextPackage } from "../validate/validate.js";
 
 export interface PrepareInput {
   readonly promptFile?: string;
@@ -109,20 +100,31 @@ export async function prepareContext(input: PrepareInput): Promise<PrepareResult
     return failure("INVALID_ARGUMENT", "Prompt artifact is required");
   }
 
-  const classifications = artifacts.map(classifyArtifact);
+  const classifications = [];
+  for (const artifact of artifacts) {
+    const classification = builtinRuntime.classifyArtifact(artifact);
+    if (!classification.ok) return classification;
+    classifications.push(classification.value);
+  }
   const classificationMap = new Map(
     classifications.map((classification) => [
       classification.artifactId,
       classification
     ])
   );
-  const intent = classifyIntent(prompt);
-  const artifactOutcomes = new Map(
-    artifacts.map((artifact) => [
-      artifact.artifactId,
-      artifact.role === "prompt" ? "unknown" : determineOutcome([artifact])
-    ])
-  );
+  const intentResult = builtinRuntime.classifyIntent(prompt);
+  if (!intentResult.ok) return intentResult;
+  const intent = intentResult.value;
+  const artifactOutcomes = new Map<string, "green" | "red" | "unknown">();
+  for (const artifact of artifacts) {
+    if (artifact.role === "prompt") {
+      artifactOutcomes.set(artifact.artifactId, "unknown");
+      continue;
+    }
+    const detected = builtinRuntime.detectOutcome(artifact);
+    if (!detected.ok) return detected;
+    artifactOutcomes.set(artifact.artifactId, detected.value);
+  }
   const contextOutcomes = artifacts
     .filter((artifact) => artifact.role === "context")
     .map((artifact) => artifactOutcomes.get(artifact.artifactId) ?? "unknown");
@@ -133,16 +135,18 @@ export async function prepareContext(input: PrepareInput): Promise<PrepareResult
       ? "green"
       : "unknown";
   const runId = randomUUID();
-  const evidence = artifacts.flatMap((artifact) => {
+  const evidence = [];
+  for (const artifact of artifacts) {
     const classification = classificationMap.get(artifact.artifactId);
-    return classification === undefined
-      ? []
-      : extractEvidence(
-          artifact,
-          classification,
-          artifactOutcomes.get(artifact.artifactId) ?? "unknown"
-        );
-  });
+    if (classification === undefined) continue;
+    const detected = builtinRuntime.detectEvidence({
+      artifact,
+      classification,
+      outcome: artifactOutcomes.get(artifact.artifactId) ?? "unknown"
+    });
+    if (!detected.ok) return detected;
+    evidence.push(...detected.value.findings);
+  }
 
   const protectedRanges: ProtectedRange[] = [];
   const plans = new Map();
@@ -152,7 +156,9 @@ export async function prepareContext(input: PrepareInput): Promise<PrepareResult
     const artifactEvidence = evidence.filter(
       (item) => item.artifactId === artifact.artifactId
     );
-    const segments = segmentArtifact(artifact);
+    const segmented = builtinRuntime.segment(artifact);
+    if (!segmented.ok) return segmented;
+    const segments = segmented.value;
     const missingCiEvidence = detectMissingCiFailureEvidence(artifact);
     if (missingCiEvidence !== undefined) warnings.push(missingCiEvidence);
     const protection = buildProtectedRanges(
@@ -170,23 +176,25 @@ export async function prepareContext(input: PrepareInput): Promise<PrepareResult
         { artifactId: artifact.artifactId }
       );
     }
-    const proposals = proposeTransforms(
+    const detectedReductions = builtinRuntime.detectReductions({
       artifact,
       classification,
-      artifactOutcomes.get(artifact.artifactId) ?? "unknown"
+      outcome: artifactOutcomes.get(artifact.artifactId) ?? "unknown"
+    });
+    if (!detectedReductions.ok) return detectedReductions;
+    const decision = builtinRuntime.plan({
+      runId,
+      artifact,
+      proposals: detectedReductions.value.findings,
+      protectedRanges: protection
+    });
+    if (!decision.ok) return decision;
+    plans.set(artifact.artifactId, decision.value.value ?? []);
+    warnings.push(
+      ...decision.value.reasons
+        .filter((reason) => !reason.startsWith("0 "))
+        .map((reason) => `${reason} in ${artifact.source.label}`)
     );
-    const plan = planTransforms(runId, artifact, proposals, protection);
-    plans.set(artifact.artifactId, plan.selected);
-    if (plan.rejectedProtected.length > 0) {
-      warnings.push(
-        `${plan.rejectedProtected.length} proposals rejected for protected intersections in ${artifact.source.label}`
-      );
-    }
-    if (plan.rejectedNonBeneficial.length > 0) {
-      warnings.push(
-        `${plan.rejectedNonBeneficial.length} non-beneficial proposals rejected in ${artifact.source.label}`
-      );
-    }
     if (artifact.completeness !== "complete") {
       warnings.push(
         `Reduction abstained for incomplete artifact ${artifact.source.label}: ${artifact.completenessReason}`
@@ -241,13 +249,17 @@ export async function prepareContext(input: PrepareInput): Promise<PrepareResult
     (artifact) => plans.get(artifact.artifactId) ?? []
   );
   const manifest: CanonicalManifest = {
-    formatVersion: 1,
+    formatVersion: 2,
     runId,
     createdAt,
     artifacts: artifactManifests,
     intent,
     outcome,
     policy: { nearbySegments },
+    producerRegistry: {
+      digest: builtinRuntime.registryDigest,
+      producers: builtinRuntime.producers
+    },
     evidence,
     protectedRanges,
     transforms,

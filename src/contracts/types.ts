@@ -1,4 +1,5 @@
 import type { Result } from "../core/result.js";
+import type { ProducerMetadata } from "./providers.js";
 
 export interface ByteRange {
   startByte: number;
@@ -207,7 +208,7 @@ export interface ArtifactManifest {
 }
 
 export interface CanonicalManifest {
-  readonly formatVersion: 1;
+  readonly formatVersion: 1 | 2;
   readonly runId: string;
   readonly createdAt: string;
   readonly artifacts: readonly ArtifactManifest[];
@@ -215,6 +216,10 @@ export interface CanonicalManifest {
   readonly outcome: RunOutcome;
   readonly policy: {
     readonly nearbySegments: number;
+  };
+  readonly producerRegistry?: {
+    readonly digest: string;
+    readonly producers: readonly ProducerMetadata[];
   };
   readonly evidence: readonly EvidenceSpan[];
   readonly protectedRanges: readonly ProtectedRange[];

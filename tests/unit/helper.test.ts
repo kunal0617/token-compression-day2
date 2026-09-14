@@ -21,8 +21,10 @@ const producer: ProducerMetadata = {
 const obligation = {
   obligationId: "obligation-1",
   kind: "referenced-source",
+  key: "source",
   description: "Need source",
   status: "missing" as const,
+  required: true,
   evidenceIds: ["evidence-1"],
   reasons: ["missing"],
   producer

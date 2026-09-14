@@ -4,6 +4,10 @@ import {
 } from "../src/approval/review.js";
 import { OptionalCopilotSdkAdapter } from "../src/adapters/copilot-sdk.js";
 import { canonicalJsonDigest } from "../src/core/canonical.js";
+import {
+  assessSecurity,
+  authorizeExternalSend
+} from "../src/security/security.js";
 
 if (process.env.CTXO_LIVE_COPILOT !== "1") {
   process.stdout.write(
@@ -37,7 +41,7 @@ if (process.env.CTXO_LIVE_COPILOT !== "1") {
           evidenceRead: false,
           fileWrite: false,
           shell: false,
-          network: false
+          network: true
         }
       },
       snapshotChoice: "captured"
@@ -49,6 +53,15 @@ if (process.env.CTXO_LIVE_COPILOT !== "1") {
       decision: "approve-prepared"
     });
     if (!approval.ok) throw new Error(approval.error.message);
+    const assessment = assessSecurity([
+      { sourceId: "smoke", bytes, trustClass: "user-instruction" }
+    ]);
+    const authorization = authorizeExternalSend({
+      payload: bytes,
+      assessment,
+      explicitApproval: true
+    });
+    if (!authorization.ok) throw new Error(authorization.error.message);
     const sent = await adapter.send({
       runId: subject.value.runId,
       approved: {
@@ -60,6 +73,10 @@ if (process.env.CTXO_LIVE_COPILOT !== "1") {
         runId: subject.value.runId,
         evidence: [],
         sources: []
+      },
+      security: {
+        assessment,
+        authorization: authorization.value
       },
       timeoutMs: 60_000
     });
@@ -85,4 +102,3 @@ if (process.env.CTXO_LIVE_COPILOT !== "1") {
     }
   }
 }
-

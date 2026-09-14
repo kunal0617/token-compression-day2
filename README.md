@@ -62,7 +62,8 @@ See [architecture](docs/architecture.md) and the
 [integrity model](docs/integrity-model.md). A source-backed
 [comparison with Rohit's implementation](docs/comparison-with-rohit.md)
 separates verified strengths, reproduced risks, recommendations, and
-unverified possibilities.
+unverified possibilities. Security assumptions and residual risks are in the
+[threat model](docs/threat-model.md).
 
 ## CLI
 
@@ -212,6 +213,18 @@ Abstention, refusal, timeout, malformed output, unknown IDs, or budget excess
 become explicit no-ops. A hosted Copilot empty-session transport and a
 loopback-only OpenAI-compatible transport are available; hosted timeout aborts
 the helper session.
+
+## Security and shareable views
+
+Artifacts carry trust classes. High-confidence local scanning records only
+redacted findings for token/private-key/JWT shapes and blocks indirect
+instruction-like content from untrusted logs. Content telemetry is disabled.
+
+External live send is blocked by default and requires a separately hashed
+authorization for the exact payload/security assessment plus network
+permission. Secret-bearing payloads require a reviewed, source-linked redacted
+view with random or keyed-HMAC placeholders; unsalted secret hashes are never
+used. Indirect prompt injection is not automatically redacted.
 
 For CI summary logs, routine path/version/timestamp/identifier occurrences stay
 in the manifest but do not automatically protect neighboring lines. Source

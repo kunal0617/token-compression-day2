@@ -5,6 +5,10 @@ import type { PermissionEnvelope } from "./approval.js";
 import type { DeliverySlice } from "./source-scope.js";
 import type { EvidenceSpan } from "./types.js";
 import type { ProducerMetadata } from "./providers.js";
+import type {
+  ExternalSendAuthorization,
+  SecurityAssessment
+} from "./security.js";
 
 export interface AgentReadScope {
   readonly runId: string;
@@ -19,6 +23,10 @@ export interface ApprovedAgentSendRequest {
   readonly runId: string;
   readonly approved: ApprovedReviewPayload;
   readonly readScope: AgentReadScope;
+  readonly security: {
+    readonly assessment: SecurityAssessment;
+    readonly authorization: ExternalSendAuthorization;
+  };
   readonly timeoutMs: number;
   readonly resumeSessionId?: string;
 }
@@ -47,4 +55,3 @@ export interface ModelCatalogEntry {
   readonly name: string;
   readonly capabilities: Readonly<Record<string, unknown>>;
 }
-

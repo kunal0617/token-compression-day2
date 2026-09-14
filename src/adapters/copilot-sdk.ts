@@ -14,6 +14,7 @@ import { validateApproval } from "../approval/review.js";
 import { canonicalJsonDigest } from "../core/canonical.js";
 import { sha256Base64Url } from "../core/hash.js";
 import { failure, success, type Result } from "../core/result.js";
+import { validateExternalSendAuthorization } from "../security/security.js";
 
 export interface SdkEvent {
   readonly type?: string;
@@ -270,6 +271,18 @@ export class OptionalCopilotSdkAdapter {
       payload: approved.bytes
     });
     if (!approval.ok) return approval;
+    if (!approved.subject.target.permissions.network) {
+      return failure(
+        "INVALID_ARGUMENT",
+        "External Copilot send requires explicit network permission"
+      );
+    }
+    const security = validateExternalSendAuthorization({
+      payload: approved.bytes,
+      assessment: request.security.assessment,
+      authorization: request.security.authorization
+    });
+    if (!security.ok) return security;
     if (approved.subject.target.adapterId !== this.metadata.producerId) {
       return failure("INVALID_ARGUMENT", "Approval targets another adapter", {
         target: approved.subject.target.adapterId

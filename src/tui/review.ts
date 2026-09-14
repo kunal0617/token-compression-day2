@@ -20,6 +20,7 @@ import {
 } from "../approval/review.js";
 import { assessFailureEvidence } from "../obligations/evaluate.js";
 import { builtinRuntime } from "../registry/builtins.js";
+import { assessSecurity } from "../security/security.js";
 
 export interface ReviewRetrievalPort {
   retrieve(handle: string): Result<Buffer>;
@@ -81,12 +82,23 @@ export class TerminalReviewController {
   #subject: ReviewSubject | undefined;
   #approval: ApprovalRecord | undefined;
   #status: ReviewViewModel["status"] = "reviewing";
+  readonly #security;
 
   constructor(input: TerminalReviewInput, retrieval: ReviewRetrievalPort) {
     this.#input = input;
     this.#retrieval = retrieval;
     this.#target = input.target;
     this.#selectedBytes = Buffer.from(input.contextPackage.preparedBytes);
+    this.#security = assessSecurity(
+      input.artifacts.map((artifact) => ({
+        sourceId: artifact.artifactId,
+        bytes: artifact.bytes,
+        trustClass:
+          artifact.role === "prompt"
+            ? ("user-instruction" as const)
+            : ("build-output" as const)
+      }))
+    );
   }
 
   #clearApproval(): void {
@@ -240,7 +252,16 @@ export class TerminalReviewController {
       conflicts: gaps.filter((gap) =>
         ["ambiguous", "contradicted"].includes(gap.status)
       ),
-      security: ["Local-only review; live send remains blocked until approval"],
+      security:
+        this.#security.findings.length === 0
+          ? [
+              "No high-confidence local finding; external live send remains blocked until separate authorization",
+              "Content telemetry is disabled"
+            ]
+          : this.#security.findings.map(
+              (finding) =>
+                `${finding.kind} ${finding.sourceId} [${finding.startByte},${finding.endByte}) ${finding.redactedPreview}`
+            ),
       modelAdvice: ["Current target remains selected until explicit change"],
       target: this.#target,
       selectedSnapshot: this.#selectedSnapshot,

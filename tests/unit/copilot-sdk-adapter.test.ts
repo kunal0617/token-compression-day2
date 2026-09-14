@@ -14,6 +14,10 @@ import {
 } from "../../src/approval/review.js";
 import { canonicalJsonDigest } from "../../src/core/canonical.js";
 import { sha256Base64Url } from "../../src/core/hash.js";
+import {
+  assessSecurity,
+  authorizeExternalSend
+} from "../../src/security/security.js";
 
 interface DefinedTool {
   readonly name: string;
@@ -146,7 +150,7 @@ function request(
         evidenceRead: true,
         fileWrite: false,
         shell: false,
-        network: false
+        network: true
       }
     },
     snapshotChoice: "captured"
@@ -158,6 +162,15 @@ function request(
     decision: "approve-prepared"
   });
   if (!approval.ok) throw new Error(approval.error.message);
+  const assessment = assessSecurity([
+    { sourceId: "payload", bytes, trustClass: "user-instruction" }
+  ]);
+  const authorization = authorizeExternalSend({
+    payload: bytes,
+    assessment,
+    explicitApproval: true
+  });
+  if (!authorization.ok) throw new Error(authorization.error.message);
   return {
     runId: "run-1",
     approved: {
@@ -196,6 +209,10 @@ function request(
           unitIds: ["unit-1"]
         }
       ]
+    },
+    security: {
+      assessment,
+      authorization: authorization.value
     },
     timeoutMs: options.timeoutMs ?? 100,
     ...(options.resumeSessionId === undefined
@@ -306,4 +323,3 @@ describe("optional GitHub Copilot SDK adapter", () => {
     expect(client.started).toBe(false);
   });
 });
-

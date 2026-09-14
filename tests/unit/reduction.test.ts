@@ -332,4 +332,35 @@ describe("deterministic reduction planning", () => {
       ).some((proposal) => proposal.reason === "ci-wrapper")
     ).toBe(false);
   });
+
+  it("does not fold differing numeric bracket values as copied ANSI", () => {
+    const artifact = snapshotBytes(
+      Buffer.from(
+        [
+          "2031-04-05T10:00:00.0000000Z ##[group]Jobs Output",
+          '2031-04-05T10:00:00.0100000Z \"id\": \"alpha[31m\"',
+          '2031-04-05T10:00:00.0200000Z \"id\": \"beta[32m\"',
+          '2031-04-05T10:00:00.0300000Z \"id\": \"gamma[33m\"',
+          '2031-04-05T10:00:00.0400000Z \"id\": \"delta[34m\"',
+          '2031-04-05T10:00:00.0500000Z \"id\": \"epsilon[35m\"',
+          "2031-04-05T10:00:00.0600000Z ##[endgroup]",
+          ""
+        ].join("\n"),
+        "utf8"
+      ),
+      {
+        ordinal: 1,
+        role: "context",
+        kind: "pasted",
+        label: "literal-brackets.log"
+      }
+    );
+    expect(
+      proposeTransforms(
+        artifact,
+        classifyArtifact(artifact),
+        "unknown"
+      ).some((proposal) => proposal.reason === "ci-wrapper")
+    ).toBe(false);
+  });
 });

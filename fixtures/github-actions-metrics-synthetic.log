@@ -81,6 +81,14 @@
 2031-04-05T10:00:00.8000000Z [36;1m  total_count=$((total_count + 1))[0m
 2031-04-05T10:00:00.8100000Z [36;1m  conclusion_json+="\"$job_name\":\"$job_state\","[0m
 2031-04-05T10:00:00.8200000Z [36;1mdone[0m
+2031-04-05T10:00:00.8210000Z [36;1mecho "wrapper metric calculation prepared"[0m
+2031-04-05T10:00:00.8220000Z [36;1mecho "wrapper metric calculation validated"[0m
+2031-04-05T10:00:00.8230000Z [36;1mecho "wrapper job output loaded"[0m
+2031-04-05T10:00:00.8240000Z [36;1mecho "wrapper job output parsed"[0m
+2031-04-05T10:00:00.8250000Z [36;1mecho "wrapper counters initialized"[0m
+2031-04-05T10:00:00.8260000Z [36;1mecho "wrapper counters updated"[0m
+2031-04-05T10:00:00.8270000Z [36;1mecho "wrapper conclusion assembled"[0m
+2031-04-05T10:00:00.8280000Z [36;1mecho "wrapper outputs prepared"[0m
 2031-04-05T10:00:00.8300000Z [36;1mconclusion_json=$(echo "$conclusion_json" | sed 's/,$/}/')[0m
 2031-04-05T10:00:00.8400000Z [36;1mecho "$conclusion_json" | jq[0m
 2031-04-05T10:00:00.8500000Z [36;1mecho "jobs_executed=$total_count" >> "$GITHUB_OUTPUT"[0m

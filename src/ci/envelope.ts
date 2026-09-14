@@ -2,8 +2,10 @@ import type { ArtifactSnapshot } from "../contracts/types.js";
 import { splitRawLines, type LineRecord } from "../segment/segment.js";
 
 const ISO_ENVELOPE =
-  /^\uFEFF?(?<timestamp>\d{4}-\d{2}-\d{2}T[0-2]\d:[0-5]\d:[0-5]\d(?:\.\d+)?Z)\s(?<content>[\s\S]*)$/;
+  /^(?:\uFEFF|\u00ef\u00bb\u00bf)?(?<timestamp>\d{4}-\d{2}-\d{2}T[0-2]\d:[0-5]\d:[0-5]\d(?:\.\d+)?Z)\s(?<content>[\s\S]*)$/;
 const ANSI_SGR = /\u001b\[[0-9;]*m/g;
+const COPIED_ANSI_WRAPPER =
+  /^\[(?:[1-9]\d{0,2})(?:;(?:0|[1-9]\d{0,2})){0,7}m(?<body>[\s\S]*)\[0m$/;
 
 export interface CiLineAnalysis {
   readonly line: LineRecord;
@@ -12,6 +14,8 @@ export interface CiLineAnalysis {
   readonly content: string;
   readonly stableSignature: string;
   readonly hadAnsi: boolean;
+  readonly hadRealAnsi: boolean;
+  readonly hadCopiedAnsi: boolean;
   readonly directive: "group" | "endgroup" | "none";
   readonly groupTitle?: string;
 }
@@ -22,6 +26,20 @@ function withoutLineEnding(value: string): string {
 
 export function stripAnsiSgr(value: string): string {
   return value.replace(ANSI_SGR, "");
+}
+
+function analyzeCiEnvelopeSgr(value: string): {
+  readonly content: string;
+  readonly hadRealAnsi: boolean;
+  readonly hadCopiedAnsi: boolean;
+} {
+  const withoutRealAnsi = stripAnsiSgr(value);
+  const copied = COPIED_ANSI_WRAPPER.exec(withoutRealAnsi);
+  return {
+    content: copied?.groups?.body ?? withoutRealAnsi,
+    hadRealAnsi: withoutRealAnsi !== value,
+    hadCopiedAnsi: copied !== null
+  };
 }
 
 export function normalizeCiStableContent(value: string): string {
@@ -44,7 +62,15 @@ export function analyzeCiLines(
     const rawBody = withoutLineEnding(line.text);
     const envelope = ISO_ENVELOPE.exec(rawBody);
     const contentWithAnsi = envelope?.groups?.content ?? rawBody.replace(/^\uFEFF/u, "");
-    const content = stripAnsiSgr(contentWithAnsi);
+    const sgr =
+      envelope === null
+        ? {
+            content: stripAnsiSgr(contentWithAnsi),
+            hadRealAnsi: stripAnsiSgr(contentWithAnsi) !== contentWithAnsi,
+            hadCopiedAnsi: false
+          }
+        : analyzeCiEnvelopeSgr(contentWithAnsi);
+    const content = sgr.content;
     const group = /^(?:##\[group\]|::group::)(.*)$/i.exec(content);
     const endGroup = /^(?:##\[endgroup\]|::endgroup::)\s*$/i.test(content);
     return {
@@ -55,7 +81,9 @@ export function analyzeCiLines(
         : { timestamp: envelope.groups.timestamp }),
       content,
       stableSignature: normalizeCiStableContent(content),
-      hadAnsi: contentWithAnsi !== content,
+      hadAnsi: sgr.hadRealAnsi || sgr.hadCopiedAnsi,
+      hadRealAnsi: sgr.hadRealAnsi,
+      hadCopiedAnsi: sgr.hadCopiedAnsi,
       directive: group !== null ? "group" : endGroup ? "endgroup" : "none",
       ...(group?.[1] === undefined ? {} : { groupTitle: group[1].trim() })
     };
@@ -121,7 +149,7 @@ export function isCiCriticalContent(content: string): boolean {
 
 export function isCiCriticalLine(analysis: CiLineAnalysis): boolean {
   if (
-    analysis.hadAnsi &&
+    analysis.hadRealAnsi &&
     !isCiActualDiagnosticContent(analysis.content) &&
     !/##\[(?:error|warning)\]|::(?:error|warning)\b/i.test(analysis.content)
   ) {

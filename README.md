@@ -34,6 +34,13 @@ provider. Its provider-neutral handoff port accepts only a
 - GitHub Actions/Azure-style timestamp and ANSI envelopes are stripped only in
   the analysis view. Original bytes remain the hashing, rendering, retrieval,
   and reconstruction authority.
+- The analysis view also recognizes the common copied-transcript degradation:
+  literal UTF-8 BOM mojibake (`\u00ef\u00bb\u00bf`) before the first ISO
+  timestamp and a coherent whole-line copied-SGR wrapper such as
+  `[36;1mcommand[0m` after an ESC byte has been removed. Inferred copied ANSI
+  requires a non-reset opener at the start plus a trailing `[0m` reset on a
+  line already proven to have a CI timestamp envelope. Embedded numeric bracket
+  values, arbitrary bracket text, and non-CI logs are untouched.
 - Recognized CI wrapper groups, repeated setup metadata, echoed shell
   scaffolding, and stable envelope-only repetitions can fold behind handles.
   Failure conclusions, job/workflow/run/branch/image facts, zero-artifact
@@ -109,6 +116,14 @@ deprecation warning, and chronology remained literal.
 
 `fixtures/github-actions-metrics-synthetic.log` is a sanitized, invented
 equivalent used by the public regression suite.
+
+The same local log was also recreated as a common manually copied transcript
+by replacing the real BOM with literal `\u00ef\u00bb\u00bf` bytes and removing
+ESC bytes while leaving `[36;1m... [0m` fragments. Before this hardening it
+measured 15,929 → 12,803 tokens (**19.62%**), 86 protected spans, and 27
+handles. It now measures 15,929 → 11,136 tokens (**30.09%**), 87 protected
+spans, and 43 handles, with the same required evidence, warning, integrity, and
+byte-identical reconstruction.
 
 ## Development
 

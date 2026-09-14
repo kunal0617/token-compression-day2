@@ -77,7 +77,10 @@ only to the artifact whose own authoritative outcome is green.
 Recognized CI logs receive a separate analysis view. A leading BOM/ISO
 timestamp and ANSI SGR wrappers are excluded from signatures and parser
 matching only; source byte coordinates and all retained/omitted bytes are
-unchanged. CI group proposals keep directive titles and critical lines literal
+unchanged. The timestamp-proven path also recognizes BOM mojibake and coherent
+whole-line copied-SGR wrappers with an opening numeric code and trailing reset
+left after an ESC byte is removed; embedded numeric bracket values remain
+literal. That recognition is never applied globally. CI group proposals keep directive titles and critical lines literal
 while placing only explicitly allowlisted runner/setup/JSON/shell wrapper
 records behind ordinary content-addressed handles. CI mode requires at least
 three envelopes, at least 40% envelope coverage, and balanced directive

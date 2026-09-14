@@ -109,4 +109,64 @@ describe("CI envelope analysis", () => {
     );
     expect(isRecognizedCiArtifact(analyzeCiLines(artifact))).toBe(false);
   });
+
+  it("analyzes copied mojibake BOM and ESC-stripped SGR only inside CI envelopes", () => {
+    const bytes = Buffer.from(
+      [
+        "\u00ef\u00bb\u00bf2031-04-05T10:00:00.0000000Z ##[group]Run copied setup",
+        "2031-04-05T10:00:00.0100000Z [36;1mecho copied[0m",
+        "2031-04-05T10:00:00.0200000Z [36;1mecho copied[0m",
+        "2031-04-05T10:00:00.0300000Z ##[endgroup]",
+        "plain [36;1mtext[0m must stay untouched",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+    const artifact = snapshotBytes(bytes, {
+      ordinal: 1,
+      role: "context",
+      kind: "pasted",
+      label: "copied-ci.log"
+    });
+    const analysis = analyzeCiLines(artifact);
+
+    expect(isRecognizedCiArtifact(analysis)).toBe(true);
+    expect(analysis[0]?.directive).toBe("group");
+    expect(analysis[1]?.content).toBe("echo copied");
+    expect(analysis[1]?.hadAnsi).toBe(true);
+    expect(analysis[1]?.hadCopiedAnsi).toBe(true);
+    expect(analysis[1]?.hadRealAnsi).toBe(false);
+    expect(analysis[4]?.content).toBe("plain [36;1mtext[0m must stay untouched");
+    expect(artifact.bytes.equals(bytes)).toBe(true);
+    expect(artifact.hasBom).toBe(false);
+    expect(artifact.hasAnsi).toBe(false);
+  });
+
+  it("preserves numeric bracket fragments embedded in enveloped values", () => {
+    const artifact = snapshotBytes(
+      Buffer.from(
+        [
+          "2031-04-05T10:00:00.0000000Z ##[group]Jobs Output",
+          '2031-04-05T10:00:00.0100000Z \"id\": \"alpha[31m\"',
+          '2031-04-05T10:00:00.0200000Z \"id\": \"beta[32m\"',
+          '2031-04-05T10:00:00.0300000Z \"id\": \"gamma[33m\"',
+          "2031-04-05T10:00:00.0400000Z ##[endgroup]",
+          ""
+        ].join("\n"),
+        "utf8"
+      ),
+      {
+        ordinal: 1,
+        role: "context",
+        kind: "pasted",
+        label: "numeric-brackets.log"
+      }
+    );
+    const analysis = analyzeCiLines(artifact);
+
+    expect(analysis[1]?.content).toContain("alpha[31m");
+    expect(analysis[2]?.content).toContain("beta[32m");
+    expect(analysis[1]?.hadCopiedAnsi).toBe(false);
+    expect(analysis[2]?.hadAnsi).toBe(false);
+  });
 });

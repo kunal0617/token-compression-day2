@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -74,5 +74,61 @@ describe("GitHub Actions wrapper reduction", () => {
       rmSync(directory, { recursive: true, force: true });
     }
   });
-});
 
+  it("reduces a copied transcript with BOM mojibake and stripped ESC bytes", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "ctxo-ci-copied-"));
+    const storePath = join(directory, "context.sqlite");
+    const source = readFileSync(
+      resolve("fixtures\\github-actions-metrics-synthetic.log"),
+      "utf8"
+    ).replace(/^\uFEFF/u, "");
+    const copied = `\u00ef\u00bb\u00bf${source.replace(/\u001b/g, "")}`;
+    try {
+      const result = await prepareContext({
+        promptText:
+          "Diagnose the failed copied CI transcript and preserve failure metadata.",
+        contextTexts: [{ label: "copied-ci.log", text: copied }],
+        storePath
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.receipt.tokenReductionPercent).toBeGreaterThanOrEqual(
+        30
+      );
+      expect(result.value.receipt.handles.length).toBeGreaterThan(0);
+      expect(result.value.receipt.warnings).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining("detailed failing job log")
+        ])
+      );
+      for (const required of [
+        '"name": "test (linux-image-build)"',
+        '"name": "Set up job"',
+        '"conclusion": "failure"',
+        "branch: release-demo",
+        "image-name: demo-image-2031",
+        "Found 0 artifact(s)",
+        "demo.ci.workflow_success_percent",
+        "##[warning]Node.js 20 is deprecated"
+      ]) {
+        expect(result.value.package.preparedText).toContain(required);
+      }
+      const sourceArtifact = result.value.package.manifest.artifacts.find(
+        (artifact) => artifact.source.label === "copied-ci.log"
+      );
+      expect(sourceArtifact?.byteLength).toBe(Buffer.byteLength(copied, "utf8"));
+
+      const store = new ContextStore(storePath);
+      try {
+        expect(verifyStoredRun(store, result.value.package.runId).ok).toBe(true);
+        for (const handle of result.value.receipt.handles) {
+          expect(store.retrieve(handle).ok).toBe(true);
+        }
+      } finally {
+        store.close();
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});

@@ -12,7 +12,11 @@ import type {
 } from "./types.js";
 import type { EvidenceObligation } from "./providers.js";
 import type { AgentReadScope } from "./agent.js";
-import type { EvidenceFact } from "./obligations.js";
+import type { AgentRunScopeAuthority } from "./agent.js";
+import type {
+  EvidenceFact,
+  EvidenceRetrievalAdapter
+} from "./obligations.js";
 import type { SourceSnapshotIdentity } from "./provenance.js";
 import type { Result } from "../core/result.js";
 
@@ -59,7 +63,6 @@ export type ReviewAction =
       readonly choice: Exclude<SnapshotChoice, "cancel">;
     }
   | { readonly type: "edit-result"; readonly bytes: Buffer }
-  | { readonly type: "add-evidence-facts"; readonly facts: readonly EvidenceFact[] }
   | { readonly type: "set-target"; readonly target: ApprovalTarget }
   | { readonly type: "reject" }
   | { readonly type: "cancel" };
@@ -71,6 +74,8 @@ export interface TerminalReviewInput {
   readonly artifacts: readonly ArtifactSnapshot[];
   readonly readScope: AgentReadScope;
   readonly gatheredFacts?: readonly EvidenceFact[];
+  readonly retrievalAdapters?: ReadonlyMap<string, EvidenceRetrievalAdapter>;
+  readonly approvalAuthority?: AgentRunScopeAuthority;
   readonly currentSource?: CurrentSourceReadPort;
   readonly target: ApprovalTarget;
 }
@@ -91,4 +96,6 @@ export interface ApprovedReviewPayload {
   readonly bytes: Buffer;
   readonly subject: ReviewSubject;
   readonly approval: ApprovalRecord;
+  readonly evidenceFacts: readonly EvidenceFact[];
+  readonly authorityToken: string;
 }

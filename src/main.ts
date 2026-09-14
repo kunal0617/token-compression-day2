@@ -18,6 +18,7 @@ import {
   TerminalReviewController
 } from "./tui/review.js";
 import { LocalFileCurrentSourcePort } from "./tui/current-source.js";
+import { CommittedRunScopeAuthority } from "./adapters/run-authority.js";
 
 export const HELP = `Context Overflow POC
 
@@ -630,6 +631,7 @@ async function runReview(parsed: ParsedArgs, io: CliIo): Promise<number> {
           sources: []
         },
         currentSource: new LocalFileCurrentSourcePort(snapshots.value),
+        approvalAuthority: new CommittedRunScopeAuthority(store),
         target: {
           adapterId: adapter.value ?? "offline",
           ...(session.value === undefined

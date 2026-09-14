@@ -186,6 +186,41 @@ describe("CQ-05 JS/TS source scope", () => {
     ).toBe(true);
   });
 
+  it("includes every referenced declaration from one dependency file", () => {
+    const documents = [
+      document(
+        "entry",
+        "virtual/multi-entry.ts",
+        'import { foo, type Config } from "./dep.js";\nexport function run(config: Config) { return foo(config); }\n'
+      ),
+      document(
+        "dep",
+        "virtual/dep.ts",
+        [
+          "export interface Config { enabled: boolean }",
+          "export function foo(config: Config) { return config.enabled; }",
+          "export const unrelated = 42;",
+          ""
+        ].join("\n")
+      )
+    ];
+    const plan = buildDeliveryPlan({
+      documents,
+      roots: [{ sourceId: "entry", symbol: "run" }],
+      rules: fullRules
+    });
+    expect(plan.ok).toBe(true);
+    if (!plan.ok) return;
+    const dependency = Buffer.concat(
+      plan.value.slices
+        .filter((slice) => slice.sourceId === "dep")
+        .map((slice) => slice.bytes)
+    ).toString("utf8");
+    expect(dependency).toContain("interface Config");
+    expect(dependency).toContain("function foo");
+    expect(dependency).not.toContain("unrelated");
+  });
+
   it("uses an explicit exact whole-file fallback for other languages", () => {
     const source = document(
       "python",

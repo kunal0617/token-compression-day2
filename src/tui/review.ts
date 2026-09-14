@@ -22,7 +22,10 @@ import {
   selectSnapshot,
   validateApproval
 } from "../approval/review.js";
-import { assessFailureEvidence } from "../obligations/evaluate.js";
+import {
+  assessFailureEvidence,
+  executeBoundedRetrieval
+} from "../obligations/evaluate.js";
 import { builtinRuntime } from "../registry/builtins.js";
 import { assessSecurity } from "../security/security.js";
 
@@ -70,7 +73,10 @@ function obligations(
       evidence: input.contextPackage.manifest.evidence.filter(
         (evidence) => evidence.artifactId === artifact.artifactId
       ),
-      additionalFacts: gatheredFacts
+      additionalFacts: gatheredFacts,
+      trustedRetrievalProducers: [
+        ...(input.retrievalAdapters?.values() ?? [])
+      ].map((adapter) => adapter.metadata)
     });
     if (assessed.ok) results.push(...assessed.value.sufficiency.obligations);
   }
@@ -100,6 +106,7 @@ export class TerminalReviewController {
   #payloadRole: ReviewSubject["payloadRole"] = "prepared";
   #subject: ReviewSubject | undefined;
   #approval: ApprovalRecord | undefined;
+  #authorityToken: string | undefined;
   #status: ReviewViewModel["status"] = "reviewing";
   readonly #security;
   #gatheredFacts: EvidenceFact[];
@@ -132,6 +139,7 @@ export class TerminalReviewController {
   #clearApproval(): void {
     this.#subject = undefined;
     this.#approval = undefined;
+    this.#authorityToken = undefined;
     if (this.#status === "approved") this.#status = "reviewing";
   }
 
@@ -203,7 +211,9 @@ export class TerminalReviewController {
       payload: this.#selectedBytes,
       sourceIdentities: this.#selectedSourceIdentities,
       policyDigest: canonicalJsonDigest(
-        this.#input.contextPackage.manifest.policy
+        this.#input.contextPackage.manifest.policy ?? {
+          nearbySegments: 1
+        }
       ),
       detectorRegistryDigest:
         this.#input.contextPackage.manifest.producerRegistry?.digest ??
@@ -226,8 +236,26 @@ export class TerminalReviewController {
       decision
     });
     if (!approval.ok) return approval;
+    if (this.#input.approvalAuthority === undefined) {
+      return failure(
+        "INTEGRITY_ERROR",
+        "A committed-run approval authority is required"
+      );
+    }
+    const authority = this.#input.approvalAuthority.issueReview({
+      runId: this.#input.contextPackage.runId,
+      approved: {
+        bytes: Buffer.from(this.#selectedBytes),
+        subject: subject.value,
+        approval: approval.value,
+        evidenceFacts: [...this.#gatheredFacts]
+      },
+      readScope: this.#input.readScope
+    });
+    if (!authority.ok) return authority;
     this.#subject = subject.value;
     this.#approval = approval.value;
+    this.#authorityToken = authority.value;
     this.#status = "approved";
     return success(undefined);
   }
@@ -246,24 +274,6 @@ export class TerminalReviewController {
       this.#selectedSnapshot = "editable-merge";
       this.#payloadRole = "merged";
       this.#clearApproval();
-      return success(undefined);
-    }
-    if (action.type === "add-evidence-facts") {
-      this.#gatheredFacts = [
-        ...new Map(
-          [...this.#gatheredFacts, ...action.facts].map((fact) => [
-            fact.factId,
-            fact
-          ])
-        ).values()
-      ];
-      const saved = this.#retrieval.saveReviewFacts?.(
-        this.#input.contextPackage.runId,
-        this.#gatheredFacts
-      );
-      if (saved !== undefined && !saved.ok) return saved;
-      this.#clearApproval();
-      this.#status = "reviewing";
       return success(undefined);
     }
     if (action.type === "choose-snapshot") {
@@ -315,6 +325,7 @@ export class TerminalReviewController {
       this.#clearApproval();
       return success(undefined);
     }
+
     if (action.type === "approve-prepared") {
       this.#selectedBytes = Buffer.from(
         this.#input.contextPackage.preparedBytes
@@ -358,8 +369,66 @@ export class TerminalReviewController {
     return success(undefined);
   }
 
+  async gatherEvidence(): Promise<Result<void>> {
+    if (this.#input.retrievalAdapters === undefined) {
+      return failure(
+        "INVALID_ARGUMENT",
+        "No approved bounded retrieval adapters are configured"
+      );
+    }
+    const retrievalAdapters = this.#input.retrievalAdapters;
+    const requests = this.#input.artifacts
+      .filter((artifact) => artifact.role !== "prompt")
+      .flatMap((artifact) => {
+        const assessed = assessFailureEvidence({
+          artifact,
+          evidence: this.#input.contextPackage.manifest.evidence.filter(
+            (evidence) => evidence.artifactId === artifact.artifactId
+          ),
+          additionalFacts: this.#gatheredFacts,
+          trustedRetrievalProducers: [
+            ...retrievalAdapters.values()
+          ].map((adapter) => adapter.metadata)
+        });
+        return assessed.ok
+          ? assessed.value.sufficiency.retrievalRequests
+          : [];
+      });
+    if (requests.length === 0) {
+      return failure(
+        "INVALID_ARGUMENT",
+        "No unresolved obligation has a bounded retrieval request"
+      );
+    }
+    const retrieved = await executeBoundedRetrieval(
+      requests,
+      retrievalAdapters
+    );
+    if (!retrieved.ok) return retrieved;
+    this.#gatheredFacts = [
+      ...new Map(
+        [...this.#gatheredFacts, ...retrieved.value].map((fact) => [
+          fact.factId,
+          fact
+        ])
+      ).values()
+    ];
+    const saved = this.#retrieval.saveReviewFacts?.(
+      this.#input.contextPackage.runId,
+      this.#gatheredFacts
+    );
+    if (saved !== undefined && !saved.ok) return saved;
+    this.#clearApproval();
+    this.#status = "reviewing";
+    return success(undefined);
+  }
+
   approvedPayload(): Result<ApprovedReviewPayload> {
-    if (this.#subject === undefined || this.#approval === undefined) {
+    if (
+      this.#subject === undefined ||
+      this.#approval === undefined ||
+      this.#authorityToken === undefined
+    ) {
       return failure(
         "INVALID_ARGUMENT",
         "No digest-bound approval is active"
@@ -416,7 +485,9 @@ export class TerminalReviewController {
     return success({
       bytes: Buffer.from(this.#selectedBytes),
       subject: this.#subject,
-      approval: this.#approval
+      approval: this.#approval,
+      evidenceFacts: [...this.#gatheredFacts],
+      authorityToken: this.#authorityToken
     });
   }
 
@@ -499,7 +570,7 @@ export async function runTerminalReview(
       printView(view, (value) => io.write(value));
       const answer = (
         await io.question(
-          "Command [approve/approve-selected/approve-merged/original/gather/fact <json>/snapshot <captured|current|both>/diff/evidence/gaps/conflicts/security/model/omissions/retrieve <handle>/edit <text>/target <adapter> <model|-> <session|-> <permissions>/reject/cancel]: "
+          "Command [approve/approve-selected/approve-merged/original/gather/snapshot <captured|current|both>/diff/evidence/gaps/conflicts/security/model/omissions/retrieve <handle>/edit <text>/target <adapter> <model|-> <session|-> <permissions>/reject/cancel]: "
         )
       ).trim();
       if (answer === "approve") {
@@ -523,24 +594,8 @@ export async function runTerminalReview(
         return controller.approvedPayload();
       }
       if (answer === "gather") {
-        controller.dispatch({ type: "gather-evidence" });
-        return success(undefined);
-      }
-      if (answer.startsWith("fact ")) {
-        try {
-          const fact = JSON.parse(
-            answer.slice("fact ".length)
-          ) as EvidenceFact;
-          const added = controller.dispatch({
-            type: "add-evidence-facts",
-            facts: [fact]
-          });
-          if (!added.ok) return added;
-        } catch (error) {
-          return failure("INVALID_ARGUMENT", "Invalid evidence fact JSON", {
-            cause: error instanceof Error ? error.message : String(error)
-          });
-        }
+        const gathered = await controller.gatherEvidence();
+        if (!gathered.ok) return gathered;
         continue;
       }
       if (answer === "diff") {

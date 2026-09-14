@@ -208,7 +208,7 @@ export interface ArtifactManifest {
   readonly hasAnsi: boolean;
   readonly completeness: "complete" | "truncated" | "unknown";
   readonly completenessReason: string;
-  readonly outcome: RunOutcome;
+  readonly outcome?: RunOutcome;
   readonly classification: ArtifactClassification;
 }
 
@@ -219,7 +219,7 @@ export interface CanonicalManifest {
   readonly artifacts: readonly ArtifactManifest[];
   readonly intent: IntentClassification;
   readonly outcome: RunOutcome;
-  readonly policy: {
+  readonly policy?: {
     readonly nearbySegments: number;
   };
   readonly producerRegistry?: {
@@ -266,6 +266,8 @@ export interface ValidatedContextPackage extends ContextPackage {
     readonly status: "validated";
     readonly reconstruction: "byte-identical";
     readonly committed: true;
+    readonly evidenceDecision: EvidenceSufficiencyResult["decision"];
+    readonly evidenceCompletionDigest?: string;
   };
 }
 

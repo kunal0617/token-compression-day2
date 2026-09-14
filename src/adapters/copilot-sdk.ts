@@ -127,7 +127,9 @@ function snapshotRequest(
     approved: {
       bytes: approvedBytes,
       subject: structuredClone(input.approved.subject),
-      approval: structuredClone(input.approved.approval)
+      approval: structuredClone(input.approved.approval),
+      evidenceFacts: structuredClone(input.approved.evidenceFacts),
+      authorityToken: input.approved.authorityToken
     },
     readScope: {
       runId: input.readScope.runId,
@@ -422,6 +424,7 @@ export class OptionalCopilotSdkAdapter {
   readonly #authority: AgentRunScopeAuthority | undefined;
   #client: SdkClientLike | undefined;
   #clientWorkingDirectory: string | undefined;
+  #operationTail: Promise<void> = Promise.resolve();
   #sdk: SdkModuleLike | undefined;
   readonly #sessions = new Map<
     string,
@@ -440,6 +443,20 @@ export class OptionalCopilotSdkAdapter {
   ) {
     this.#loader = loader;
     this.#authority = authority;
+  }
+
+  async #exclusive<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.#operationTail;
+    let release = (): void => undefined;
+    this.#operationTail = new Promise<void>((resolveOperation) => {
+      release = resolveOperation;
+    });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
   }
 
   async #ensureClient(workingDirectory: string): Promise<SdkClientLike> {
@@ -473,21 +490,29 @@ export class OptionalCopilotSdkAdapter {
   async listModels(
     workingDirectory = process.cwd()
   ): Promise<Result<readonly ModelCatalogEntry[]>> {
-    try {
-      const client = await this.#ensureClient(workingDirectory);
-      const models = await client.listModels();
-      return success(models.map(normalizeModel));
-    } catch (error) {
-      return failure("IO_ERROR", "Unable to load Copilot model catalog", {
-        cause: error instanceof Error ? error.message : String(error)
-      });
-    }
+    return this.#exclusive(async () => {
+      try {
+        const client = await this.#ensureClient(workingDirectory);
+        const models = await client.listModels();
+        return success(models.map(normalizeModel));
+      } catch (error) {
+        return failure("IO_ERROR", "Unable to load Copilot model catalog", {
+          cause: error instanceof Error ? error.message : String(error)
+        });
+      }
+    });
   }
 
   async send(
     input: ApprovedAgentSendRequest
   ): Promise<Result<AgentSendReceipt>> {
     const request = snapshotRequest(input);
+    return this.#exclusive(() => this.#sendSnapshot(request));
+  }
+
+  async #sendSnapshot(
+    request: ApprovedAgentSendRequest
+  ): Promise<Result<AgentSendReceipt>> {
     const { approved } = request;
     if (
       request.runId !== approved.subject.runId ||
@@ -537,11 +562,8 @@ export class OptionalCopilotSdkAdapter {
         "Committed run scope authority is required for external send"
       );
     }
-    const authoritativeScope = this.#authority.validate(
-      request.runId,
-      request.readScope
-    );
-    if (!authoritativeScope.ok) return authoritativeScope;
+    const authoritativeRequest = this.#authority.validate(request);
+    if (!authoritativeRequest.ok) return authoritativeRequest;
     if (!approved.subject.target.permissions.network) {
       return failure(
         "INVALID_ARGUMENT",
@@ -555,6 +577,16 @@ export class OptionalCopilotSdkAdapter {
       return failure(
         "INVALID_ARGUMENT",
         "Copilot approval must bind an explicit model"
+      );
+    }
+    if (
+      request.security.assessedSource.trustClass !==
+        "external-untrusted" ||
+      !request.security.assessedSource.bytes.equals(approved.bytes)
+    ) {
+      return failure(
+        "INTEGRITY_ERROR",
+        "Copilot outbound security must conservatively assess the exact approved payload"
       );
     }
     const security = validateExternalSendAuthorization({
@@ -738,28 +770,30 @@ export class OptionalCopilotSdkAdapter {
   }
 
   async close(): Promise<Result<void>> {
-    try {
-      for (const cached of this.#sessions.values()) {
-        await cached.session.disconnect();
-      }
-      this.#sessions.clear();
-      if (this.#client !== undefined) {
-        const errors = await this.#client.stop();
-        if (errors.length > 0) {
-          return failure("IO_ERROR", "Copilot SDK cleanup reported errors", {
-            errors: errors.map((error) => error.message)
-          });
+    return this.#exclusive(async () => {
+      try {
+        for (const cached of this.#sessions.values()) {
+          await cached.session.disconnect();
         }
+        this.#sessions.clear();
+        if (this.#client !== undefined) {
+          const errors = await this.#client.stop();
+          if (errors.length > 0) {
+            return failure("IO_ERROR", "Copilot SDK cleanup reported errors", {
+              errors: errors.map((error) => error.message)
+            });
+          }
+        }
+        this.#client = undefined;
+        this.#clientWorkingDirectory = undefined;
+        this.#sdk = undefined;
+        return success(undefined);
+      } catch (error) {
+        return failure("IO_ERROR", "Copilot SDK cleanup failed", {
+          cause: error instanceof Error ? error.message : String(error)
+        });
       }
-      this.#client = undefined;
-      this.#clientWorkingDirectory = undefined;
-      this.#sdk = undefined;
-      return success(undefined);
-    } catch (error) {
-      return failure("IO_ERROR", "Copilot SDK cleanup failed", {
-        cause: error instanceof Error ? error.message : String(error)
-      });
-    }
+    });
   }
 }
 

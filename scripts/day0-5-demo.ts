@@ -27,6 +27,7 @@ import {
   verifyStoredRun
 } from "../src/validate/validate.js";
 import { typedFailureParsers } from "../src/parsers/failures.js";
+import { CommittedRunScopeAuthority } from "../src/adapters/run-authority.js";
 
 const outputDirectory = resolve(".context-overflow");
 await mkdir(outputDirectory, { recursive: true });
@@ -175,6 +176,7 @@ try {
         }),
         sources: []
       },
+      approvalAuthority: new CommittedRunScopeAuthority(store),
       target: {
         adapterId: "offline",
         modelId: "routine-demo",

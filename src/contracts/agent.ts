@@ -23,10 +23,12 @@ export interface AgentReadScope {
 }
 
 export interface AgentRunScopeAuthority {
-  validate(
-    runId: string,
-    scope: AgentReadScope
-  ): Result<void>;
+  issueReview(input: {
+    readonly runId: string;
+    readonly approved: Omit<ApprovedReviewPayload, "authorityToken">;
+    readonly readScope: AgentReadScope;
+  }): Result<string>;
+  validate(request: ApprovedAgentSendRequest): Result<void>;
 }
 
 export interface ApprovedAgentSendRequest {

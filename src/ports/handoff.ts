@@ -13,7 +13,7 @@ export class OfflineHandoffPort implements CodingAgentHandoffPort {
     contextPackage: ValidatedContextPackage
   ): Promise<Result<HandoffReceipt>> {
     if (
-      contextPackage.manifest.evidenceGate?.decision ===
+      contextPackage.validation.evidenceDecision ===
       "gather-more-evidence"
     ) {
       return failure(

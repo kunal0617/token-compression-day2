@@ -221,7 +221,6 @@ export function buildDeliveryPlan(input: {
         }
         selectedSources.add(targetSourceId);
       }
-      if (targetAlreadySelected) continue;
       const targetRange =
         edge.kind === "test" && edge.toSourceId === current.sourceId
           ? {
@@ -240,12 +239,14 @@ export function buildDeliveryPlan(input: {
       for (const unit of targetUnits) {
         if (!selectedUnits.has(unit.unitId)) {
           selectedUnits.set(unit.unitId, unit);
-          queue.push({
-            sourceId: unit.sourceId,
-            startByte: unit.startByte,
-            endByte: unit.endByte,
-            depth: current.depth + 1
-          });
+          if (!(targetAlreadySelected && unit.kind === "import")) {
+            queue.push({
+              sourceId: unit.sourceId,
+              startByte: unit.startByte,
+              endByte: unit.endByte,
+              depth: current.depth + 1
+            });
+          }
         }
       }
     }

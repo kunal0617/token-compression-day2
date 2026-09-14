@@ -379,18 +379,39 @@ export function factsFromFailureReports(
 
 export function createEvidenceFact(input: Omit<EvidenceFact, "factId" | "validationDigest">): EvidenceFact {
   const factId = deterministicUuid(
-    `${input.obligationId}:${input.kind}:${input.key}:${input.artifactId}:${input.startByte}:${input.endByte}:${input.sha256}:${input.value}`
+    canonicalJsonDigest(input)
   );
   const unsigned = { factId, ...input };
   return { ...unsigned, validationDigest: canonicalJsonDigest(unsigned) };
 }
 
-function validFact(
+export function validateEvidenceFact(
   fact: EvidenceFact,
   spec: EvidenceObligationSpec,
-  evidence: readonly EvidenceSpan[]
+  evidence: readonly EvidenceSpan[],
+  trustedRetrievalProducers: readonly ProducerMetadata[]
 ): boolean {
   const { validationDigest, ...unsigned } = fact;
+  const retrievalRequest =
+    spec.retrieval === undefined
+      ? undefined
+      : {
+          obligationId: spec.obligationId,
+          ...spec.retrieval
+        };
+  const trustedRetrieval =
+    fact.origin === "bounded-retrieval" &&
+    fact.retrievalBinding !== undefined &&
+    retrievalRequest !== undefined &&
+    fact.retrievalBinding.requestDigest ===
+      canonicalJsonDigest(retrievalRequest) &&
+    fact.retrievalBinding.adapter.producerId ===
+      retrievalRequest.adapterId &&
+    trustedRetrievalProducers.some(
+      (producer) =>
+        canonicalJsonDigest(producer) ===
+        canonicalJsonDigest(fact.retrievalBinding?.adapter)
+    );
   return (
     validationDigest === canonicalJsonDigest(unsigned) &&
     fact.obligationId === spec.obligationId &&
@@ -400,8 +421,10 @@ function validFact(
     fact.byteLength === fact.endByte - fact.startByte &&
     fact.byteLength >= 0 &&
     /^[A-Za-z0-9_-]{43}$/.test(fact.sha256) &&
-    (fact.origin === "bounded-retrieval" ||
-      (fact.evidenceIds.every((evidenceId) =>
+    (trustedRetrieval ||
+      (fact.origin === "detector-evidence" &&
+        fact.retrievalBinding === undefined &&
+        fact.evidenceIds.every((evidenceId) =>
         evidence.some((span) => span.evidenceId === evidenceId)
       ) &&
         evidence.some(
@@ -427,11 +450,18 @@ export class EvidenceObligationEvaluator {
     specs: readonly EvidenceObligationSpec[],
     facts: readonly EvidenceFact[],
     now = new Date(),
-    evidence: readonly EvidenceSpan[] = []
+    evidence: readonly EvidenceSpan[] = [],
+    trustedRetrievalProducers: readonly ProducerMetadata[] = []
   ): EvidenceSufficiencyResult {
     const obligations: EvidenceObligation[] = specs.map((item) => {
       const matches = facts.filter(
-        (fact) => validFact(fact, item, evidence)
+        (fact) =>
+          validateEvidenceFact(
+            fact,
+            item,
+            evidence,
+            trustedRetrievalProducers
+          )
       );
       const values = [...new Set(matches.map((fact) => fact.value))];
       const freshnessMs = item.freshnessMs;
@@ -578,13 +608,29 @@ export async function executeBoundedRetrieval(
         adapterId: request.adapterId
       });
     }
+    if (
+      adapter.metadata.producerId !== request.adapterId ||
+      !/^[A-Za-z0-9_-]{43}$/.test(adapter.metadata.digest)
+    ) {
+      return failure(
+        "INTEGRITY_ERROR",
+        "Evidence retrieval adapter metadata does not match the request",
+        { adapterId: request.adapterId }
+      );
+    }
     const retrieved = await adapter.retrieve(request);
     if (!retrieved.ok) return retrieved;
+    const requestDigest = canonicalJsonDigest(request);
+    const responseDigest = canonicalJsonDigest(retrieved.value);
     let totalBytes = 0;
+    const boundFacts: EvidenceFact[] = [];
     for (const fact of retrieved.value) {
       totalBytes += fact.byteLength;
       if (
         fact.obligationId !== request.obligationId ||
+        fact.evidenceIds.length === 0 ||
+        fact.endByte < fact.startByte ||
+        fact.byteLength !== fact.endByte - fact.startByte ||
         fact.byteLength !== Buffer.byteLength(fact.value, "utf8") ||
         fact.sha256 !== sha256Base64Url(Buffer.from(fact.value, "utf8")) ||
         (request.artifactId !== undefined &&
@@ -593,17 +639,12 @@ export async function executeBoundedRetrieval(
           fact.startByte < request.startByte) ||
         (request.endByte !== undefined && fact.endByte > request.endByte) ||
         fact.origin !== "bounded-retrieval" ||
-        !validFact(
-          fact,
-          {
-            obligationId: request.obligationId,
-            kind: fact.kind,
-            description: request.purpose,
-            key: fact.key,
-            required: true
-          },
-          []
-        )
+        fact.retrievalBinding !== undefined ||
+        fact.validationDigest !==
+          canonicalJsonDigest(
+            (({ validationDigest: _validationDigest, ...unsigned }) =>
+              unsigned)(fact)
+          )
       ) {
         return failure(
           "INTEGRITY_ERROR",
@@ -611,6 +652,32 @@ export async function executeBoundedRetrieval(
           { obligationId: request.obligationId }
         );
       }
+      boundFacts.push(
+        createEvidenceFact({
+          obligationId: fact.obligationId,
+          kind: fact.kind,
+          key: fact.key,
+          value: fact.value,
+          evidenceIds: [...fact.evidenceIds],
+          artifactId: fact.artifactId,
+          startByte: fact.startByte,
+          endByte: fact.endByte,
+          sha256: fact.sha256,
+          byteLength: fact.byteLength,
+          origin: "bounded-retrieval",
+          retrievalBinding: {
+            requestDigest,
+            responseDigest,
+            adapter: structuredClone(adapter.metadata)
+          },
+          ...(fact.observedAt === undefined
+            ? {}
+            : { observedAt: fact.observedAt }),
+          ...(fact.contradicts === undefined
+            ? {}
+            : { contradicts: fact.contradicts })
+        })
+      );
     }
     if (totalBytes > request.maxBytes) {
       return failure(
@@ -619,7 +686,7 @@ export async function executeBoundedRetrieval(
         { obligationId: request.obligationId, totalBytes }
       );
     }
-    facts.push(...retrieved.value);
+    facts.push(...boundFacts);
   }
   return success(facts);
 }
@@ -628,6 +695,7 @@ export function assessFailureEvidence(input: {
   readonly artifact: ArtifactSnapshot;
   readonly evidence: readonly EvidenceSpan[];
   readonly additionalFacts?: readonly EvidenceFact[];
+  readonly trustedRetrievalProducers?: readonly ProducerMetadata[];
 }): Result<{
   readonly reports: readonly FailureReport[];
   readonly sufficiency: EvidenceSufficiencyResult;
@@ -651,7 +719,8 @@ export function assessFailureEvidence(input: {
     specs,
     facts,
     new Date(),
-    input.evidence
+    input.evidence,
+    input.trustedRetrievalProducers ?? []
   );
   const decision = gatherMoreEvidencePolicy.decide(sufficiency);
   if (!decision.ok) return decision;

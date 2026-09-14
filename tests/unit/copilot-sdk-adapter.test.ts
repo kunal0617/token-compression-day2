@@ -37,6 +37,9 @@ class FakeSession implements SdkSessionLike {
   aborted = false;
   disconnected = false;
   pending = false;
+  delayMs = 0;
+  activeSends = 0;
+  maxConcurrentSends = 0;
 
   constructor(sessionId: string) {
     this.sessionId = sessionId;
@@ -51,6 +54,11 @@ class FakeSession implements SdkSessionLike {
   }
 
   async sendAndWait(options: { prompt: string }): Promise<SdkEvent | undefined> {
+    this.activeSends += 1;
+    this.maxConcurrentSends = Math.max(
+      this.maxConcurrentSends,
+      this.activeSends
+    );
     this.prompts.push(options.prompt);
     this.handlers.forEach((handler) =>
       handler({
@@ -60,6 +68,12 @@ class FakeSession implements SdkSessionLike {
       })
     );
     if (this.pending) return new Promise(() => undefined);
+    if (this.delayMs > 0) {
+      await new Promise((resolveDelay) =>
+        setTimeout(resolveDelay, this.delayMs)
+      );
+    }
+    this.activeSends -= 1;
     return {
       type: "assistant.message",
       data: { content: "OK" }
@@ -166,7 +180,10 @@ function createAdapter(
 ): OptionalCopilotSdkAdapter {
   return new OptionalCopilotSdkAdapter(
     async () => fakeSdk(client, tools),
-    { validate: () => success(undefined) }
+    {
+      issueReview: () => success("ctxo-approval:v1:test"),
+      validate: () => success(undefined)
+    }
   );
 }
 
@@ -282,7 +299,9 @@ function request(
     approved: {
       bytes,
       subject: subject.value,
-      approval: approval.value
+      approval: approval.value,
+      evidenceFacts: [],
+      authorityToken: "ctxo-approval:v1:test"
     },
     readScope,
     security: {
@@ -504,10 +523,51 @@ describe("optional GitHub Copilot SDK adapter", () => {
       }
     });
     expect((await adapter.send(noNetwork)).ok).toBe(false);
+    const downgraded = request(adapter);
+    const downgradedSource = {
+      ...downgraded.security.assessedSource,
+      trustClass: "user-instruction" as const
+    };
+    const downgradedAssessment = assessSecurity([downgradedSource]);
+    const downgradedAuthorization = authorizeExternalSend({
+      payload: downgraded.approved.bytes,
+      assessment: downgradedAssessment,
+      explicitApproval: true,
+      assessedSource: downgradedSource
+    });
+    expect(downgradedAuthorization.ok).toBe(true);
+    if (!downgradedAuthorization.ok) return;
+    expect(
+      (
+        await adapter.send({
+          ...downgraded,
+          security: {
+            assessment: downgradedAssessment,
+            authorization: downgradedAuthorization.value,
+            assessedSource: downgradedSource
+          }
+        })
+      ).ok
+    ).toBe(false);
     expect(
       (await adapter.send(request(adapter, { omitModel: true }))).ok
     ).toBe(false);
     expect(client.started).toBe(false);
+  });
+
+  it("serializes concurrent sends through one cached session", async () => {
+    const client = new FakeClient();
+    const adapter = createAdapter(client);
+    expect((await adapter.send(request(adapter))).ok).toBe(true);
+    client.session.delayMs = 15;
+    const [first, second] = await Promise.all([
+      adapter.send(request(adapter, { sessionId: "session-1" })),
+      adapter.send(request(adapter, { sessionId: "session-1" }))
+    ]);
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+    expect(client.session.maxConcurrentSends).toBe(1);
+    await adapter.close();
   });
 
   it("blocks secret, injection-like, and invalid UTF-8 tool results", async () => {
@@ -633,6 +693,7 @@ describe("optional GitHub Copilot SDK adapter", () => {
     const denied = new OptionalCopilotSdkAdapter(
       async () => fakeSdk(client, []),
       {
+        issueReview: () => success("ctxo-approval:v1:test"),
         validate: () => ({
           ok: false,
           error: {

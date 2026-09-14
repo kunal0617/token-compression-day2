@@ -1,4 +1,5 @@
 import { mkdirSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
@@ -23,7 +24,10 @@ import type {
   OutputMapping,
   ValidatedContextPackage
 } from "../contracts/types.js";
-import { canonicalJson } from "../core/canonical.js";
+import {
+  canonicalJson,
+  canonicalJsonDigest
+} from "../core/canonical.js";
 import { sha256Base64Url } from "../core/hash.js";
 import { failure, success, type Result } from "../core/result.js";
 import { buildReceipt } from "../receipt/receipt.js";
@@ -269,6 +273,25 @@ export class ContextStore {
         digest TEXT NOT NULL,
         PRIMARY KEY(run_id, fact_id),
         FOREIGN KEY(run_id) REFERENCES runs(run_id) ON DELETE CASCADE
+      ) STRICT;
+
+      CREATE TABLE IF NOT EXISTS evidence_completions (
+        run_id TEXT PRIMARY KEY,
+        facts_digest TEXT NOT NULL,
+        completed_at TEXT NOT NULL,
+        FOREIGN KEY(run_id) REFERENCES runs(run_id) ON DELETE CASCADE
+      ) STRICT;
+
+      CREATE TABLE IF NOT EXISTS review_authorities (
+        token_hash TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        request_digest TEXT NOT NULL,
+        payload_digest TEXT NOT NULL,
+        payload_size INTEGER NOT NULL,
+        facts_digest TEXT NOT NULL,
+        issued_at TEXT NOT NULL,
+        FOREIGN KEY(run_id) REFERENCES runs(run_id) ON DELETE CASCADE,
+        FOREIGN KEY(payload_digest) REFERENCES blobs(digest)
       ) STRICT;
     `);
     const runColumns = this.#database
@@ -884,13 +907,18 @@ export class ContextStore {
           );
         }
         const parsed = JSON.parse(row.canonical_json) as EvidenceFact;
+        const {
+          validationDigest,
+          ...unsigned
+        } = parsed;
         if (
           typeof parsed.factId !== "string" ||
           typeof parsed.kind !== "string" ||
           typeof parsed.key !== "string" ||
           typeof parsed.value !== "string" ||
           !Array.isArray(parsed.evidenceIds) ||
-          canonicalJson(parsed) !== row.canonical_json
+          canonicalJson(parsed) !== row.canonical_json ||
+          validationDigest !== canonicalJsonDigest(unsigned)
         ) {
           return failure(
             "INTEGRITY_ERROR",
@@ -926,6 +954,15 @@ export class ContextStore {
         throw new Error("Review facts require a committed validated run");
       }
       const factIds = new Set<string>();
+      this.#database
+        .prepare("DELETE FROM evidence_completions WHERE run_id=?")
+        .run(runId);
+      this.#database
+        .prepare("DELETE FROM review_authorities WHERE run_id=?")
+        .run(runId);
+      this.#database
+        .prepare("DELETE FROM review_evidence_facts WHERE run_id=?")
+        .run(runId);
       for (const fact of facts) {
         if (factIds.has(fact.factId)) {
           throw new Error(`Duplicate review evidence fact ${fact.factId}`);
@@ -960,6 +997,215 @@ export class ContextStore {
         runId,
         cause: errorMessage(error)
       });
+    }
+  }
+
+  saveEvidenceCompletion(
+    runId: string,
+    factsDigest: string
+  ): Result<void> {
+    try {
+      if (!/^[A-Za-z0-9_-]{43}$/.test(factsDigest)) {
+        return failure(
+          "INVALID_ARGUMENT",
+          "Evidence completion digest is invalid"
+        );
+      }
+      this.#database.exec("BEGIN IMMEDIATE");
+      const facts = this.loadReviewFacts(runId);
+      if (!facts.ok) throw new Error(facts.error.message);
+      if (canonicalJsonDigest(facts.value) !== factsDigest) {
+        throw new Error(
+          "Evidence completion does not match persisted review facts"
+        );
+      }
+      this.#database
+        .prepare(
+          `INSERT INTO evidence_completions(
+            run_id, facts_digest, completed_at
+          ) VALUES (?, ?, ?)
+          ON CONFLICT(run_id) DO UPDATE SET
+            facts_digest=excluded.facts_digest,
+            completed_at=excluded.completed_at`
+        )
+        .run(runId, factsDigest, new Date().toISOString());
+      this.#database.exec("COMMIT");
+      return success(undefined);
+    } catch (error) {
+      try {
+        this.#database.exec("ROLLBACK");
+      } catch {
+        // SQLite reports no active transaction after an automatic rollback.
+      }
+      return failure(
+        "STORAGE_ERROR",
+        "Unable to save evidence completion",
+        { runId, cause: errorMessage(error) }
+      );
+    }
+  }
+
+  loadEvidenceCompletion(
+    runId: string
+  ): Result<{ readonly factsDigest: string } | undefined> {
+    try {
+      const row = this.#database
+        .prepare(
+          `SELECT c.facts_digest
+           FROM evidence_completions c
+           JOIN runs r ON r.run_id=c.run_id
+           WHERE c.run_id=? AND r.status='committed'
+             AND r.validation_status='validated'`
+        )
+        .get(runId) as { facts_digest: string } | undefined;
+      if (row === undefined) return success(undefined);
+      const facts = this.loadReviewFacts(runId);
+      if (
+        !facts.ok ||
+        canonicalJsonDigest(facts.value) !== row.facts_digest
+      ) {
+        return failure(
+          "INTEGRITY_ERROR",
+          "Evidence completion does not match persisted facts",
+          { runId }
+        );
+      }
+      return success({ factsDigest: row.facts_digest });
+    } catch (error) {
+      return failure(
+        "STORAGE_ERROR",
+        "Unable to load evidence completion",
+        { runId, cause: errorMessage(error) }
+      );
+    }
+  }
+
+  issueReviewAuthority(input: {
+    readonly runId: string;
+    readonly requestDigest: string;
+    readonly payload: Buffer;
+    readonly factsDigest: string;
+  }): Result<string> {
+    try {
+      if (
+        !/^[A-Za-z0-9_-]{43}$/.test(input.requestDigest) ||
+        !/^[A-Za-z0-9_-]{43}$/.test(input.factsDigest)
+      ) {
+        return failure(
+          "INVALID_ARGUMENT",
+          "Review authority digests are invalid"
+        );
+      }
+      const token = randomBytes(32).toString("base64url");
+      const tokenHash = sha256Base64Url(Buffer.from(token, "utf8"));
+      const payloadDigest = sha256Base64Url(input.payload);
+      this.#database.exec("BEGIN IMMEDIATE");
+      const run = this.#database
+        .prepare(
+          `SELECT run_id FROM runs
+           WHERE run_id=? AND status='committed'
+             AND validation_status='validated'`
+        )
+        .get(input.runId);
+      if (run === undefined) {
+        throw new Error(
+          "Review authority requires a committed validated run"
+        );
+      }
+      this.#putBlob(payloadDigest, input.payload);
+      this.#database
+        .prepare(
+          `INSERT INTO review_authorities(
+            token_hash, run_id, request_digest, payload_digest,
+            payload_size, facts_digest, issued_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          tokenHash,
+          input.runId,
+          input.requestDigest,
+          payloadDigest,
+          input.payload.length,
+          input.factsDigest,
+          new Date().toISOString()
+        );
+      this.#database.exec("COMMIT");
+      return success(`ctxo-approval:v1:${token}`);
+    } catch (error) {
+      try {
+        this.#database.exec("ROLLBACK");
+      } catch {
+        // SQLite reports no active transaction after an automatic rollback.
+      }
+      return failure(
+        "STORAGE_ERROR",
+        "Unable to issue review authority",
+        { runId: input.runId, cause: errorMessage(error) }
+      );
+    }
+  }
+
+  validateReviewAuthority(input: {
+    readonly token: string;
+    readonly runId: string;
+    readonly requestDigest: string;
+    readonly payload: Buffer;
+    readonly factsDigest: string;
+  }): Result<void> {
+    const match =
+      /^ctxo-approval:v1:([A-Za-z0-9_-]{43})$/.exec(input.token);
+    if (match?.[1] === undefined) {
+      return failure(
+        "INTEGRITY_ERROR",
+        "Review authority token is invalid"
+      );
+    }
+    try {
+      const row = this.#database
+        .prepare(
+          `SELECT a.request_digest, a.payload_digest, a.payload_size,
+                  a.facts_digest, b.bytes
+           FROM review_authorities a
+           JOIN runs r ON r.run_id=a.run_id
+           JOIN blobs b ON b.digest=a.payload_digest
+           WHERE a.token_hash=? AND a.run_id=?
+             AND r.status='committed'
+             AND r.validation_status='validated'`
+        )
+        .get(
+          sha256Base64Url(Buffer.from(match[1], "utf8")),
+          input.runId
+        ) as
+        | {
+            request_digest: string;
+            payload_digest: string;
+            payload_size: number;
+            facts_digest: string;
+            bytes: Uint8Array;
+          }
+        | undefined;
+      const bytes = row === undefined ? undefined : Buffer.from(row.bytes);
+      if (
+        row === undefined ||
+        bytes === undefined ||
+        row.request_digest !== input.requestDigest ||
+        row.payload_digest !== sha256Base64Url(input.payload) ||
+        row.payload_size !== input.payload.length ||
+        row.facts_digest !== input.factsDigest ||
+        !bytes.equals(input.payload)
+      ) {
+        return failure(
+          "INTEGRITY_ERROR",
+          "Review authority does not match the approved request"
+        );
+      }
+      return success(undefined);
+    } catch (error) {
+      return failure(
+        "STORAGE_ERROR",
+        "Unable to validate review authority",
+        { runId: input.runId, cause: errorMessage(error) }
+      );
     }
   }
 
@@ -1265,7 +1511,10 @@ export class ContextStore {
       validation: {
         status: "validated",
         reconstruction: "byte-identical",
-        committed: true
+        committed: true,
+        evidenceDecision:
+          input.contextPackage.manifest.evidenceGate?.decision ??
+          "ready"
       }
     });
   }

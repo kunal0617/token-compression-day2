@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import type { ApprovalTarget } from "../../src/contracts/approval.js";
+import type { EvidenceRetrievalAdapter } from "../../src/contracts/obligations.js";
 import type { CurrentSourceReadPort } from "../../src/contracts/tui.js";
 import { sha256Base64Url } from "../../src/core/hash.js";
 import { prepareContext } from "../../src/pipeline/prepare.js";
@@ -19,6 +20,8 @@ import {
   snapshotsFromManifest,
   verifyStoredRun
 } from "../../src/validate/validate.js";
+import { CommittedRunScopeAuthority } from "../../src/adapters/run-authority.js";
+import { OfflineHandoffPort } from "../../src/ports/handoff.js";
 
 const target: ApprovalTarget = {
   adapterId: "offline",
@@ -37,7 +40,8 @@ const target: ApprovalTarget = {
 async function fixture(
   currentSource?: CurrentSourceReadPort,
   promptText = "Fix the failure while summarizing this routine trace.",
-  contextText = "long repeated routine trace payload\n".repeat(100)
+  contextText = "long repeated routine trace payload\n".repeat(100),
+  retrievalAdapters?: ReadonlyMap<string, EvidenceRetrievalAdapter>
 ) {
   const directory = mkdtempSync(join(tmpdir(), "ctxo-tui-"));
   const storePath = join(directory, "context.sqlite");
@@ -89,6 +93,16 @@ async function fixture(
         }),
         sources: []
       },
+      ...(retrievalAdapters === undefined
+        ? {}
+        : { retrievalAdapters }),
+      approvalAuthority: new CommittedRunScopeAuthority(
+        store,
+        [],
+        [...(retrievalAdapters?.values() ?? [])].map(
+          (adapter) => adapter.metadata
+        )
+      ),
       ...(currentSource === undefined ? {} : { currentSource }),
       target
     },
@@ -227,6 +241,44 @@ describe("terminal-first review TUI", () => {
   });
 
   it("persists gathered facts and re-evaluates gaps before approval", async () => {
+    let expectedGap:
+      | ReturnType<TerminalReviewController["view"]>["gaps"][number]
+      | undefined;
+    const adapter: EvidenceRetrievalAdapter = {
+      metadata: {
+        producerId: "source-read",
+        kind: "source-adapter",
+        version: "1.0.0",
+        digest: sha256Base64Url(
+          Buffer.from("test.source-read", "utf8")
+        )
+      },
+      retrieve: async (request) => {
+        if (expectedGap === undefined) {
+          throw new Error("Expected gap was not selected");
+        }
+        const value = "validated failure block";
+        const bytes = Buffer.from(value, "utf8");
+        return {
+          ok: true,
+          value: [
+            createEvidenceFact({
+              obligationId: request.obligationId,
+              kind: "referenced-source",
+              key: expectedGap.key,
+              value,
+              evidenceIds: ["retrieved-failure-block"],
+              artifactId: request.artifactId ?? "retrieved-source",
+              startByte: 0,
+              endByte: bytes.length,
+              sha256: sha256Base64Url(bytes),
+              byteLength: bytes.length,
+              origin: "bounded-retrieval"
+            })
+          ]
+        };
+      }
+    };
     const value = await fixture(
       undefined,
       "Fix the failure.",
@@ -235,7 +287,8 @@ describe("terminal-first review TUI", () => {
         "  at run (src/app.ts:2:3)",
         "Process exited with code 1",
         ""
-      ].join("\n")
+      ].join("\n"),
+      new Map([["source-read", adapter]])
     );
     try {
       const gap = value.controller.view().gaps.find(
@@ -246,35 +299,24 @@ describe("terminal-first review TUI", () => {
         value.controller.dispatch({ type: "approve-prepared" }).ok
       ).toBe(false);
       if (gap === undefined) return;
-      expect(
-        value.controller.dispatch({
-          type: "add-evidence-facts",
-          facts: [
-            createEvidenceFact({
-              obligationId: gap.obligationId,
-              kind: "referenced-source",
-              key: gap.key,
-              value: "exact source retrieved",
-              evidenceIds: ["retrieved-source"],
-              artifactId: "source-artifact",
-              startByte: 0,
-              endByte: Buffer.byteLength("exact source retrieved", "utf8"),
-              sha256: sha256Base64Url(
-                Buffer.from("exact source retrieved", "utf8")
-              ),
-              byteLength: Buffer.byteLength(
-                "exact source retrieved",
-                "utf8"
-              ),
-              origin: "bounded-retrieval"
-            })
-          ]
-        }).ok
-      ).toBe(true);
+      expectedGap = gap;
+      expect((await value.controller.gatherEvidence()).ok).toBe(true);
       expect(value.controller.view().gaps).toHaveLength(0);
       expect(
         value.controller.dispatch({ type: "approve-prepared" }).ok
       ).toBe(true);
+      const completed = verifyStoredRun(
+        value.store,
+        value.prepared.package.runId
+      );
+      expect(
+        completed.ok && completed.value.validation.evidenceDecision
+      ).toBe("ready");
+      if (completed.ok) {
+        expect(
+          (await new OfflineHandoffPort().handoff(completed.value)).ok
+        ).toBe(true);
+      }
 
       const persisted = value.store.loadReviewFacts(
         value.prepared.package.runId
@@ -284,6 +326,10 @@ describe("terminal-first review TUI", () => {
           expect.objectContaining({ obligationId: gap.obligationId })
         ])
       );
+      expect(
+        persisted.ok &&
+          persisted.value[0]?.retrievalBinding?.adapter.producerId
+      ).toBe("source-read");
     } finally {
       value.store.close();
       rmSync(value.directory, { recursive: true, force: true });

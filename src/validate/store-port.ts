@@ -30,4 +30,7 @@ export interface ValidationStore {
     runId: string
   ): Result<readonly ProducerMetadata[]>;
   inspectReceipt(runId: string): Result<ContextReceipt>;
+  loadEvidenceCompletion?(
+    runId: string
+  ): Result<{ readonly factsDigest: string } | undefined>;
 }

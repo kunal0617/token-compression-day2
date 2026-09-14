@@ -46,13 +46,17 @@ function fact(
     kind: "configuration",
     key,
     value,
-    evidenceIds: [`evidence-${obligationId}`],
+    evidenceIds: [
+      `evidence-${obligationId}-${sha256Base64Url(
+        Buffer.from(value, "utf8")
+      )}`
+    ],
     artifactId: "artifact",
     startByte: 0,
     endByte: Buffer.byteLength(value, "utf8"),
-    sha256: canonicalJsonDigest(value),
+    sha256: sha256Base64Url(Buffer.from(value, "utf8")),
     byteLength: Buffer.byteLength(value, "utf8"),
-    origin: "bounded-retrieval",
+    origin: "detector-evidence",
     ...(observedAt === undefined ? {} : { observedAt })
   });
 }
@@ -76,7 +80,20 @@ describe("CQ-03/CQ-06 evidence obligations", () => {
     const result = evidenceObligationEvaluator.evaluate(
       specs,
       facts,
-      new Date("2030-01-01T00:00:00.000Z")
+      new Date("2030-01-01T00:00:00.000Z"),
+      facts.map((item) => ({
+        evidenceId: item.evidenceIds[0] as string,
+        occurrenceId: `occurrence-${item.factId}`,
+        artifactId: item.artifactId,
+        kind: "identifier",
+        startByte: item.startByte,
+        endByte: item.endByte,
+        sha256: item.sha256,
+        textPreview: item.value,
+        reasons: ["test"],
+        mandatoryInline: false,
+        protectionReasons: []
+      }))
     );
 
     expect(
@@ -172,7 +189,7 @@ describe("CQ-03/CQ-06 evidence obligations", () => {
   it("enforces retrieval count, byte, adapter, and range bounds", async () => {
     const adapter: EvidenceRetrievalAdapter = {
       metadata: {
-        producerId: "test.source-read",
+        producerId: "source-read",
         kind: "source-adapter",
         version: "1.0.0",
         digest: canonicalJsonDigest("test.source-read")
@@ -206,6 +223,50 @@ describe("CQ-03/CQ-06 evidence obligations", () => {
       new Map([["source-read", adapter]])
     );
     expect(valid.ok).toBe(true);
+    if (!valid.ok) return;
+    expect(valid.value[0]?.retrievalBinding?.adapter.producerId).toBe(
+      "source-read"
+    );
+    const retrievalSpec = spec("one", "source", {
+      kind: "referenced-source",
+      retrieval: {
+        adapterId: "source-read",
+        maxBytes: 1024,
+        purpose: "read"
+      }
+    });
+    expect(
+      evidenceObligationEvaluator.evaluate(
+        [retrievalSpec],
+        valid.value,
+        new Date(),
+        [],
+        [adapter.metadata]
+      ).decision
+    ).toBe("ready");
+    expect(
+      evidenceObligationEvaluator.evaluate(
+        [retrievalSpec],
+        [
+          createEvidenceFact({
+            obligationId: "one",
+            kind: "referenced-source",
+            key: "source",
+            value: "exact",
+            evidenceIds: ["fabricated"],
+            artifactId: "artifact",
+            startByte: 0,
+            endByte: 5,
+            sha256: sha256Base64Url(Buffer.from("exact", "utf8")),
+            byteLength: 5,
+            origin: "bounded-retrieval"
+          })
+        ],
+        new Date(),
+        [],
+        [adapter.metadata]
+      ).decision
+    ).toBe("gather-more-evidence");
 
     const oversized = await executeBoundedRetrieval(
       [

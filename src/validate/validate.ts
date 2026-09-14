@@ -323,7 +323,7 @@ export function validateContextPackage(input: {
         (item) => item.artifactId === artifact.artifactId
       ),
       segmented.value,
-      { nearbySegments: manifest.policy.nearbySegments }
+      { nearbySegments: manifest.policy?.nearbySegments ?? 1 }
     );
     recomputedProtected.push(...artifactProtected);
     const detectedReductions = builtinRuntime.detectReductions({
@@ -387,7 +387,8 @@ export function validateContextPackage(input: {
       recomputedArtifactOutcomes.get(artifact.artifactId) ?? "unknown"
   }));
   if (
-    (() => {
+    manifest.formatVersion >= 2 &&
+    ((() => {
       const recomputedIntent = builtinRuntime.classifyIntent(prompt);
       return (
         !recomputedIntent.ok ||
@@ -395,7 +396,7 @@ export function validateContextPackage(input: {
           canonicalJson(recomputedIntent.value)
       );
     })() ||
-    manifest.outcome !== recomputedOutcome ||
+    (manifest.outcome !== recomputedOutcome ||
     canonicalJson(manifestArtifactSemantics) !==
       canonicalJson(recomputedArtifactSemantics) ||
     canonicalJson(manifest.evidence) !== canonicalJson(recomputedEvidence) ||
@@ -404,7 +405,7 @@ export function validateContextPackage(input: {
     canonicalJson(manifest.transforms) !== canonicalJson(recomputedTransforms)
     ||
     (manifest.formatVersion === 3 &&
-      canonicalJson(manifest.evidenceGate) !== canonicalJson(recomputedGate))
+      canonicalJson(manifest.evidenceGate) !== canonicalJson(recomputedGate))))
   ) {
     return failure(
       "INTEGRITY_ERROR",
@@ -681,7 +682,9 @@ export function validateContextPackage(input: {
       });
     }
     const markerPattern =
-      /^\[CTXO OMIT r=([^ ]+) c=(\d+) b=(\d+) h=([^\]]+)\]\n$/;
+      manifest.formatVersion === 1
+        ? /^\[CTXO OMIT reason=([^ ]+) count=(\d+) bytes=(\d+) handle=([^\]]+)\]\n$/
+        : /^\[CTXO OMIT r=([^ ]+) c=(\d+) b=(\d+) h=([^\]]+)\]\n$/;
     const markerMatch = markerPattern.exec(omission.marker);
     if (
       markerMatch?.[1] !== omission.reason ||
@@ -948,6 +951,15 @@ export function verifyStoredRun(
     phase: "committed"
   });
   if (!validated.ok) return validated;
+  const manifestEvidenceDecision =
+    storedManifest.value.manifest.evidenceGate?.decision ?? "ready";
+  const completion =
+    manifestEvidenceDecision === "gather-more-evidence"
+      ? store.loadEvidenceCompletion?.(runId)
+      : undefined;
+  if (completion !== undefined && !completion.ok) return completion;
+  const evidenceCompletionDigest =
+    completion?.ok ? completion.value?.factsDigest : undefined;
   return success({
     runId,
     preparedBytes: prepared.value,
@@ -958,7 +970,15 @@ export function verifyStoredRun(
     validation: {
       status: "validated",
       reconstruction: "byte-identical",
-      committed: true
+      committed: true,
+      evidenceDecision:
+        manifestEvidenceDecision === "ready" ||
+        evidenceCompletionDigest !== undefined
+          ? "ready"
+          : "gather-more-evidence",
+      ...(evidenceCompletionDigest === undefined
+        ? {}
+        : { evidenceCompletionDigest })
     }
   });
 }

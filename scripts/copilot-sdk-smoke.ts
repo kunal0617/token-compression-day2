@@ -32,9 +32,10 @@ if (process.env.CTXO_LIVE_COPILOT !== "1") {
   });
   if (!prepared.ok) throw new Error(prepared.error.message);
   const store = new ContextStore(storePath);
+  const authority = new CommittedRunScopeAuthority(store);
   const adapter = new OptionalCopilotSdkAdapter(
     undefined,
-    new CommittedRunScopeAuthority(store)
+    authority
   );
   try {
     const catalog = await adapter.listModels(process.cwd());
@@ -111,12 +112,27 @@ if (process.env.CTXO_LIVE_COPILOT !== "1") {
       assessedSource
     });
     if (!authorization.ok) throw new Error(authorization.error.message);
+    const authorityToken = authority.issueReview({
+      runId: subject.value.runId,
+      approved: {
+        bytes,
+        subject: subject.value,
+        approval: approval.value,
+        evidenceFacts: []
+      },
+      readScope
+    });
+    if (!authorityToken.ok) {
+      throw new Error(authorityToken.error.message);
+    }
     const sent = await adapter.send({
       runId: subject.value.runId,
       approved: {
         bytes,
         subject: subject.value,
-        approval: approval.value
+        approval: approval.value,
+        evidenceFacts: [],
+        authorityToken: authorityToken.value
       },
       readScope,
       security: {

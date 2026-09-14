@@ -33,6 +33,11 @@ export interface EvidenceFact {
   readonly byteLength: number;
   readonly validationDigest: string;
   readonly origin: "detector-evidence" | "bounded-retrieval";
+  readonly retrievalBinding?: {
+    readonly requestDigest: string;
+    readonly responseDigest: string;
+    readonly adapter: ProducerMetadata;
+  };
   readonly observedAt?: string;
   readonly contradicts?: boolean;
 }

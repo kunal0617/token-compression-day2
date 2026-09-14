@@ -1,0 +1,25 @@
+{
+  "name": "context-overflow",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Deterministic offline context reduction with byte-identical reconstruction.",
+  "license": "Apache-2.0",
+  "bin": {
+    "context-overflow": "./dist/main.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
+

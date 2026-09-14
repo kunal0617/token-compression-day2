@@ -111,6 +111,15 @@ root, commit, tree, blob, repository path, mode, and whether current worktree
 bytes still equal the blob. Any candidate-byte mutation invalidates the
 provenance result.
 
+## CQ-02 typed failure parsers
+
+Versioned Vitest/Jest and Node/V8 detectors produce immutable typed reports for
+failing tests, exact expected/actual values, exception types/codes/causes,
+byte-ranged stack frames, commands, exits, environment facts, and explicit
+completeness. Unrecognized formats return a conservative raw-range fallback
+with `recognized: false` and `completeness: unknown`; they never become an
+empty success.
+
 For CI summary logs, routine path/version/timestamp/identifier occurrences stay
 in the manifest but do not automatically protect neighboring lines. Source
 locations require credible file extensions or diagnostic/stack/compiler

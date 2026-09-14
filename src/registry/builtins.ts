@@ -36,6 +36,12 @@ import {
   exactSourceProvenanceProvider,
   localApprovedSourceAdapter
 } from "../provenance/exact.js";
+import {
+  conservativeFailureFallbackDetector,
+  nodeV8FailureDetector,
+  typedFailureParsers,
+  vitestJestFailureDetector
+} from "../parsers/failures.js";
 import { segmentArtifact } from "../segment/segment.js";
 import { VersionedRegistry } from "./registry.js";
 
@@ -235,6 +241,9 @@ export function createBuiltinRuntime(): BuiltinRuntime {
     | ReductionPolicy
     | typeof exactSourceProvenanceProvider
     | typeof localApprovedSourceAdapter
+    | typeof vitestJestFailureDetector
+    | typeof nodeV8FailureDetector
+    | typeof conservativeFailureFallbackDetector
   >();
   for (const producer of [
     artifactClassifier,
@@ -246,6 +255,10 @@ export function createBuiltinRuntime(): BuiltinRuntime {
     reductionPolicy,
     exactSourceProvenanceProvider,
     localApprovedSourceAdapter
+    ,
+    vitestJestFailureDetector,
+    nodeV8FailureDetector,
+    conservativeFailureFallbackDetector
   ]) {
     const registered = registry.register(producer);
     if (!registered.ok) throw new Error(registered.error.message);
@@ -258,6 +271,7 @@ export function createBuiltinRuntime(): BuiltinRuntime {
     classifyIntent: (prompt) => intentClassifier.provide({ prompt }),
     detectOutcome: (artifact) => outcomeDetector.provide({ artifact }),
     detectEvidence: (request) => evidenceDetector.detect(request),
+    parseFailures: (artifact) => typedFailureParsers.parse(artifact),
     segment: (artifact) => segmentProvider.provide(artifact),
     detectReductions: (request) => reductionDetector.detect(request),
     plan: (request) => reductionPolicy.decide(request)

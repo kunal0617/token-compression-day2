@@ -11,6 +11,7 @@ import type {
   TransformProposal
 } from "./types.js";
 import type { Result } from "../core/result.js";
+import type { FailureReport } from "./failures.js";
 
 export type ProducerKind =
   | "feature-provider"
@@ -143,6 +144,9 @@ export interface BuiltinRuntime {
   detectEvidence(
     request: EvidenceDetectionRequest
   ): Result<DetectorResult<EvidenceSpan>>;
+  parseFailures(
+    artifact: ArtifactSnapshot
+  ): Result<readonly FailureReport[]>;
   segment(artifact: ArtifactSnapshot): Result<readonly Segment[]>;
   detectReductions(
     request: ReductionDetectionRequest
@@ -151,4 +155,3 @@ export interface BuiltinRuntime {
     request: ReductionPolicyRequest
   ): Result<PolicyDecision<readonly PlannedTransform[]>>;
 }
-

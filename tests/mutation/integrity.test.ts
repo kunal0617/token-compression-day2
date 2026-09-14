@@ -97,6 +97,36 @@ function verifyFails(storePath: string, runId: string): void {
 }
 
 describe("fail-closed mutations", () => {
+  it("rejects manifest and database run binding mutations", async () => {
+    for (const mutation of ["manifest-run", "run-hash"] as const) {
+      const fixture = await createFixture();
+      try {
+        if (mutation === "manifest-run") {
+          rewriteManifest(
+            fixture.storePath,
+            fixture.prepared.package.runId,
+            {
+              ...fixture.prepared.package.manifest,
+              runId: "00000000-0000-4000-8000-000000000000"
+            }
+          );
+        } else {
+          const database = new DatabaseSync(fixture.storePath);
+          database
+            .prepare("UPDATE runs SET manifest_hash=? WHERE run_id=?")
+            .run(
+              "A".repeat(43),
+              fixture.prepared.package.runId
+            );
+          database.close();
+        }
+        verifyFails(fixture.storePath, fixture.prepared.package.runId);
+      } finally {
+        rmSync(fixture.directory, { recursive: true, force: true });
+      }
+    }
+  });
+
   it("rejects a missing transform for a retained omission", async () => {
     const fixture = await createFixture();
     try {
@@ -339,13 +369,22 @@ describe("fail-closed mutations", () => {
     }
   });
 
-  it("rejects protected output changes and CRLF normalization", async () => {
-    for (const mutation of ["protected-byte", "crlf"] as const) {
+  it("rejects synthetic/protected output changes and CRLF normalization", async () => {
+    for (const mutation of ["synthetic-byte", "protected-byte", "crlf"] as const) {
       const fixture = await createFixture("\r\n");
       try {
         const bytes = Buffer.from(fixture.prepared.package.preparedBytes);
         let mutated: Buffer;
-        if (mutation === "protected-byte") {
+        if (mutation === "synthetic-byte") {
+          const mapping =
+            fixture.prepared.package.manifest.outputMappings.find(
+              (item) => item.kind === "synthetic"
+            );
+          expect(mapping).toBeDefined();
+          mutated = Buffer.from(bytes);
+          const offset = mapping?.outputStartByte as number;
+          mutated[offset] = mutated[offset] === 0x78 ? 0x79 : 0x78;
+        } else if (mutation === "protected-byte") {
           const mapping =
             fixture.prepared.package.manifest.evidenceMappings[0];
           expect(mapping).toBeDefined();

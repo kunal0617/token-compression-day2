@@ -17,6 +17,8 @@ typed non-success result; no compressed success object is emitted.
 | Protected occurrences | Every mandatory evidence occurrence has its own source-anchored literal mapping and digest |
 | Marker integrity | Marker reason, source count, byte count, handle, output bytes, and chronology agree |
 | Canonical manifest | Strict Zod schema, canonical JSON equality, and full digest agree |
+| Run binding | Package, manifest, requested run, database row, and stored manifest hash identify the same run |
+| Source-derived policy | Artifact classification/outcomes, intent, evidence, protected closure, and transform plan are recomputed from source bytes |
 | Reconstruction | Concatenating literal bytes and retrieved omissions exactly equals every original artifact |
 | Token receipt | `js-tiktoken` remeasures actual `o200k_base` original and prepared token counts |
 | Publication | Run is atomically changed from staging/pending to committed/validated with its receipt |
@@ -28,4 +30,3 @@ without sharing occurrence identity.
 The model proves retention and reconstruction for accepted packages. It does
 not claim semantic optimization, redaction, or parser completeness beyond the
 tested deterministic rules.
-

@@ -1,4 +1,5 @@
 import {
+  linkSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -107,9 +108,110 @@ describe("CLI commands", () => {
       expect(JSON.parse(String(verifyOutput[0])).reconstruction).toBe(
         "byte-identical"
       );
+
+      const collisionErrors: (string | Uint8Array)[] = [];
+      expect(
+        await runCli(
+          [
+            "prepare",
+            "--prompt-file",
+            promptPath,
+            "--context",
+            contextPath,
+            "--store",
+            storePath,
+            "--output",
+            storePath
+          ],
+          {
+            stdout: () => undefined,
+            stderr: (value) => collisionErrors.push(value)
+          }
+        )
+      ).toBe(2);
+      expect(String(collisionErrors[0])).toContain("must not overwrite");
+
+      const postCollisionVerify: (string | Uint8Array)[] = [];
+      expect(
+        await runCli(
+          [
+            "verify",
+            "--run",
+            prepareResponse.runId,
+            "--store",
+            storePath
+          ],
+          {
+            stdout: (value) => postCollisionVerify.push(value),
+            stderr: () => undefined
+          }
+        )
+      ).toBe(0);
+
+      const hardlinkPath = join(directory, "store-hardlink.sqlite");
+      linkSync(storePath, hardlinkPath);
+      const hardlinkErrors: (string | Uint8Array)[] = [];
+      expect(
+        await runCli(
+          [
+            "prepare",
+            "--prompt-file",
+            promptPath,
+            "--context",
+            contextPath,
+            "--store",
+            storePath,
+            "--output",
+            hardlinkPath
+          ],
+          {
+            stdout: () => undefined,
+            stderr: (value) => hardlinkErrors.push(value)
+          }
+        )
+      ).toBe(2);
+      expect(String(hardlinkErrors[0])).toContain("aliases");
+
+      const sidecarErrors: (string | Uint8Array)[] = [];
+      expect(
+        await runCli(
+          [
+            "prepare",
+            "--prompt-file",
+            promptPath,
+            "--context",
+            contextPath,
+            "--store",
+            storePath,
+            "--output",
+            `${storePath}-wal`
+          ],
+          {
+            stdout: () => undefined,
+            stderr: (value) => sidecarErrors.push(value)
+          }
+        )
+      ).toBe(2);
+      expect(String(sidecarErrors[0])).toContain("WAL/SHM");
+
+      const finalVerify: (string | Uint8Array)[] = [];
+      expect(
+        await runCli(
+          [
+            "verify",
+            "--run",
+            prepareResponse.runId,
+            "--store",
+            storePath
+          ],
+          {
+            stdout: (value) => finalVerify.push(value),
+            stderr: () => undefined
+          }
+        )
+      ).toBe(0);
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
   });
 });
-

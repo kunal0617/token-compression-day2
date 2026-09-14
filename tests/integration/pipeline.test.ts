@@ -70,5 +70,76 @@ describe("end-to-end offline pipeline", () => {
       rmSync(directory, { recursive: true, force: true });
     }
   });
-});
 
+  it("prepares identical input twice in one store with distinct handles", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "ctxo-repeat-store-"));
+    const storePath = join(directory, "context.sqlite");
+    try {
+      const input = {
+        promptText: "Explain this trace.",
+        contextTexts: [
+          {
+            label: "repeat.log",
+            text: "long repeated package restoration payload\n".repeat(100)
+          }
+        ],
+        storePath
+      } as const;
+      const first = await prepareContext(input);
+      const second = await prepareContext(input);
+      expect(first.ok).toBe(true);
+      expect(second.ok).toBe(true);
+      if (!first.ok || !second.ok) return;
+      expect(first.value.package.runId).not.toBe(second.value.package.runId);
+      expect(first.value.receipt.handles[0]).not.toBe(
+        second.value.receipt.handles[0]
+      );
+
+      const store = new ContextStore(storePath);
+      try {
+        expect(verifyStoredRun(store, first.value.package.runId).ok).toBe(true);
+        expect(verifyStoredRun(store, second.value.package.runId).ok).toBe(true);
+      } finally {
+        store.close();
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("does not let a green artifact authorize warning folding in an unknown artifact", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "ctxo-local-outcome-"));
+    const storePath = join(directory, "context.sqlite");
+    try {
+      const warnings = Array.from(
+        { length: 8 },
+        (_, index) =>
+          `WARN 2026-09-14T09:00:0${index}Z worker-${index} delayed request for a long local warning payload in ${30 + index}ms`
+      ).join("\n");
+      const result = await prepareContext({
+        promptText: "Inspect all artifacts.",
+        contextTexts: [
+          { label: "green.log", text: "Process exited with code 0\n" },
+          { label: "unknown-warnings.log", text: `${warnings}\n` }
+        ],
+        storePath
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.receipt.outcome).toBe("unknown");
+      const warningArtifact = result.value.package.manifest.artifacts.find(
+        (artifact) => artifact.source.label === "unknown-warnings.log"
+      );
+      expect(warningArtifact?.outcome).toBe("unknown");
+      expect(
+        result.value.package.manifest.transforms.some(
+          (transform) =>
+            transform.artifactId === warningArtifact?.artifactId &&
+            transform.reason === "volatile-template"
+        )
+      ).toBe(false);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});

@@ -93,15 +93,34 @@ function classifyLine(text: string): SegmentKind {
 }
 
 export function segmentArtifact(artifact: ArtifactSnapshot): Segment[] {
-  return splitRawLines(artifact.bytes).map((line) => ({
-    segmentId: `segment:${sha256Text(
-      `${artifact.artifactId}:${line.ordinal}:${line.startByte}:${line.endByte}`
-    )}`,
-    artifactId: artifact.artifactId,
-    ordinal: line.ordinal,
-    startByte: line.startByte,
-    endByte: line.endByte,
-    kind: classifyLine(line.text),
-    sha256: sha256Base64Url(line.bytes)
-  }));
+  let inDiff = false;
+  return splitRawLines(artifact.bytes).map((line) => {
+    const trimmed = line.text.trim();
+    const hasDiffRecordPrefix = /^[ +\\-]/.test(line.text);
+    if (
+      /^(?:diff --git |--- [ab]\/|\+\+\+ [ab]\/|@@ -\d+)/.test(trimmed)
+    ) {
+      inDiff = true;
+    } else if (
+      inDiff &&
+      !hasDiffRecordPrefix &&
+      /^(?:Process exited with code|exit code|Tests?:|Suites?:|Summary:|\$ |PS .+>)/i.test(
+        trimmed
+      )
+    ) {
+      inDiff = false;
+    }
+    const kind = inDiff ? "diff" : classifyLine(line.text);
+    return {
+      segmentId: `segment:${sha256Text(
+        `${artifact.artifactId}:${line.ordinal}:${line.startByte}:${line.endByte}`
+      )}`,
+      artifactId: artifact.artifactId,
+      ordinal: line.ordinal,
+      startByte: line.startByte,
+      endByte: line.endByte,
+      kind,
+      sha256: sha256Base64Url(line.bytes)
+    };
+  });
 }

@@ -10,16 +10,20 @@ import type {
   ArtifactClassification,
   ArtifactSnapshot,
   CanonicalManifest,
+  ContextPackage,
   ContextReceipt,
   EvidenceOutputMapping,
   EvidenceSpan,
   OmissionRecord,
-  OutputMapping
+  OutputMapping,
+  ValidatedContextPackage
 } from "../contracts/types.js";
 import { canonicalJson } from "../core/canonical.js";
 import { sha256Base64Url } from "../core/hash.js";
 import { failure, success, type Result } from "../core/result.js";
+import { buildReceipt } from "../receipt/receipt.js";
 import { parseHandle } from "./handles.js";
+import { validateContextPackage } from "../validate/validate.js";
 
 export interface StoreCommitInput {
   readonly runId: string;
@@ -53,6 +57,8 @@ interface RunRow {
 interface ManifestRow {
   readonly canonical_json: string;
   readonly digest: string;
+  readonly manifest_hash: string | null;
+  readonly run_id: string;
 }
 
 interface ArtifactBlobRow {
@@ -67,6 +73,7 @@ function errorMessage(error: unknown): string {
 export class ContextStore {
   readonly path: string;
   readonly #database: DatabaseSync;
+  #validationRunId: string | undefined;
 
   constructor(path: string) {
     if (path.trim().length === 0 || path === ":memory:") {
@@ -247,6 +254,17 @@ export class ContextStore {
   }
 
   stageRun(input: StoreCommitInput): Result<void> {
+    if (
+      input.manifest.runId !== input.runId ||
+      sha256Base64Url(Buffer.from(input.manifestJson, "utf8")) !==
+        input.manifestSha256
+    ) {
+      return failure(
+        "INTEGRITY_ERROR",
+        "Staging input run or manifest digest binding is invalid",
+        { runId: input.runId }
+      );
+    }
     try {
       this.#database.exec("BEGIN IMMEDIATE");
       const originalBytes = input.artifacts.reduce(
@@ -611,7 +629,7 @@ export class ContextStore {
     try {
       const row = this.#database
         .prepare(
-          `SELECT m.canonical_json, m.digest
+          `SELECT m.canonical_json, m.digest, r.manifest_hash, r.run_id
            FROM manifests m
            JOIN runs r ON r.run_id = m.run_id
            WHERE m.run_id=? AND r.status=? AND r.validation_status=?`
@@ -627,12 +645,25 @@ export class ContextStore {
           runId
         });
       }
+      if (row.manifest_hash !== row.digest || row.run_id !== runId) {
+        return failure(
+          "INTEGRITY_ERROR",
+          "Run manifest hash binding is invalid",
+          { runId }
+        );
+      }
       const parsedJson: unknown = JSON.parse(row.canonical_json);
       const parsed = canonicalManifestSchema.safeParse(parsedJson);
       if (!parsed.success) {
         return failure("INTEGRITY_ERROR", "Canonical manifest schema validation failed", {
           runId,
           issues: parsed.error.issues.map((issue) => issue.message)
+        });
+      }
+      if (parsed.data.runId !== runId) {
+        return failure("INTEGRITY_ERROR", "Manifest run ID binding is invalid", {
+          runId,
+          manifestRunId: parsed.data.runId
         });
       }
       if (canonicalJson(parsed.data) !== row.canonical_json) {
@@ -718,9 +749,47 @@ export class ContextStore {
     }
   }
 
-  finalizeValidated(runId: string, receipt: ContextReceipt): Result<void> {
+  beginValidation(runId: string): Result<void> {
+    if (this.#validationRunId !== undefined) {
+      return failure("STORAGE_ERROR", "A validation transaction is already active", {
+        activeRunId: this.#validationRunId
+      });
+    }
     try {
       this.#database.exec("BEGIN IMMEDIATE");
+      const row = this.#database
+        .prepare(
+          `SELECT run_id FROM runs
+           WHERE run_id=? AND status='staging' AND validation_status='pending'`
+        )
+        .get(runId);
+      if (row === undefined) {
+        throw new Error("Run is not staging and pending validation");
+      }
+      this.#validationRunId = runId;
+      return success(undefined);
+    } catch (error) {
+      try {
+        this.#database.exec("ROLLBACK");
+      } catch {
+        // SQLite reports no active transaction if BEGIN failed.
+      }
+      return failure("STORAGE_ERROR", "Unable to lock staging run for validation", {
+        runId,
+        cause: errorMessage(error)
+      });
+    }
+  }
+
+  #finalizeValidated(runId: string, receipt: ContextReceipt): Result<void> {
+    if (this.#validationRunId !== runId) {
+      return failure(
+        "STORAGE_ERROR",
+        "Run validation transaction is not active",
+        { runId }
+      );
+    }
+    try {
       const result = this.#database
         .prepare(
           `UPDATE runs
@@ -733,6 +802,7 @@ export class ContextStore {
         throw new Error("Run was not staging and pending validation");
       }
       this.#database.exec("COMMIT");
+      this.#validationRunId = undefined;
       return success(undefined);
     } catch (error) {
       try {
@@ -740,11 +810,108 @@ export class ContextStore {
       } catch {
         // SQLite reports no active transaction if BEGIN failed.
       }
+      this.#validationRunId = undefined;
       return failure("STORAGE_ERROR", "Unable to finalize validated run", {
         runId,
         cause: errorMessage(error)
       });
     }
+  }
+
+  cancelValidation(runId: string, message: string): Result<void> {
+    if (this.#validationRunId !== runId) {
+      return this.markFailed(runId, message);
+    }
+    try {
+      const result = this.#database
+        .prepare(
+          `UPDATE runs
+           SET status='failed', validation_status='failed', error=?
+           WHERE run_id=? AND status='staging'`
+        )
+        .run(message, runId);
+      if (result.changes !== 1) {
+        throw new Error("Staging run was not available to fail");
+      }
+      this.#database.exec("COMMIT");
+      this.#validationRunId = undefined;
+      return success(undefined);
+    } catch (error) {
+      try {
+        this.#database.exec("ROLLBACK");
+      } catch {
+        // SQLite reports no active transaction after an automatic rollback.
+      }
+      this.#validationRunId = undefined;
+      return failure("STORAGE_ERROR", "Unable to fail validation transaction", {
+        runId,
+        cause: errorMessage(error)
+      });
+    }
+  }
+
+  publishValidated(input: {
+    readonly contextPackage: ContextPackage;
+    readonly artifacts: readonly ArtifactSnapshot[];
+    readonly receipt: ContextReceipt;
+  }): Result<ValidatedContextPackage> {
+    const runId = input.contextPackage.runId;
+    const receiptValidation = contextReceiptSchema.safeParse(input.receipt);
+    if (!receiptValidation.success) {
+      this.markFailed(runId, "Receipt contract validation failed");
+      return failure("INTEGRITY_ERROR", "Receipt contract validation failed", {
+        issues: receiptValidation.error.issues.map((issue) => issue.message)
+      });
+    }
+    const locked = this.beginValidation(runId);
+    if (!locked.ok) {
+      this.markFailed(runId, locked.error.message);
+      return locked;
+    }
+    const validated = validateContextPackage({
+      contextPackage: input.contextPackage,
+      artifacts: input.artifacts,
+      store: this,
+      phase: "staging"
+    });
+    if (!validated.ok) {
+      const cancelled = this.cancelValidation(runId, validated.error.message);
+      return cancelled.ok ? validated : cancelled;
+    }
+    const expectedReceipt = buildReceipt({
+      runId,
+      classifications: input.contextPackage.manifest.artifacts.map(
+        (artifact) => artifact.classification
+      ),
+      intent: input.contextPackage.manifest.intent,
+      outcome: input.contextPackage.manifest.outcome,
+      originalBytes: input.contextPackage.manifest.originalByteLength,
+      preparedBytes: input.contextPackage.manifest.compactByteLength,
+      tokens: input.contextPackage.manifest.tokenizer,
+      evidence: input.contextPackage.manifest.evidence,
+      omissions: input.contextPackage.manifest.omissions,
+      warnings: input.receipt.warnings
+    });
+    if (canonicalJson(expectedReceipt) !== canonicalJson(input.receipt)) {
+      const message = "Receipt does not match the validated package";
+      const cancelled = this.cancelValidation(runId, message);
+      return cancelled.ok
+        ? failure("INTEGRITY_ERROR", message)
+        : cancelled;
+    }
+    const finalized = this.#finalizeValidated(runId, input.receipt);
+    if (!finalized.ok) {
+      this.markFailed(runId, finalized.error.message);
+      return finalized;
+    }
+    return success({
+      ...input.contextPackage,
+      validation: {
+        status: "validated",
+        reconstruction: "byte-identical",
+        committed: true
+      }
+    });
   }
 
   markFailed(runId: string, message: string): Result<void> {
@@ -801,6 +968,10 @@ export class ContextStore {
   }
 
   close(): void {
+    if (this.#validationRunId !== undefined) {
+      this.#database.exec("ROLLBACK");
+      this.#validationRunId = undefined;
+    }
     this.#database.close();
   }
 }

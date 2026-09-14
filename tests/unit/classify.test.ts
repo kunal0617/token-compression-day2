@@ -63,7 +63,7 @@ describe("deterministic classification and outcome precedence", () => {
       proposals.some((proposal) => proposal.reason === "volatile-template")
     ).toBe(true);
     expect(
-      planTransforms(log, proposals, []).selected.some(
+      planTransforms("run-fixed", log, proposals, []).selected.some(
         (proposal) => proposal.reason === "volatile-template"
       )
     ).toBe(true);

@@ -1,3 +1,8 @@
+import {
+  classifyArtifact,
+  classifyIntent,
+  determineOutcome
+} from "../classify/classify.js";
 import { canonicalManifestSchema } from "../contracts/schemas.js";
 import type {
   ArtifactSnapshot,
@@ -11,11 +16,15 @@ import { canonicalJson } from "../core/canonical.js";
 import { sha256Base64Url } from "../core/hash.js";
 import { assertRange, rangesIntersect } from "../core/ranges.js";
 import { failure, success, type Result } from "../core/result.js";
+import { extractEvidence } from "../evidence/extract.js";
+import { buildProtectedRanges } from "../protect/protect.js";
+import { planTransforms } from "../reduce/planner.js";
+import { proposeTransforms } from "../reduce/propose.js";
 import { renderContext } from "../render/render.js";
-import { splitRawLines } from "../segment/segment.js";
+import { segmentArtifact, splitRawLines } from "../segment/segment.js";
 import { parseHandle } from "../storage/handles.js";
-import type { ContextStore } from "../storage/store.js";
 import { measureTokens } from "../token/tokenizer.js";
+import type { ValidationStore } from "./store-port.js";
 
 function validateOutputPartition(
   preparedBytes: Buffer,
@@ -91,11 +100,21 @@ function sourceMappingsFor(
 export function validateContextPackage(input: {
   readonly contextPackage: ContextPackage;
   readonly artifacts: readonly ArtifactSnapshot[];
-  readonly store: ContextStore;
+  readonly store: ValidationStore;
   readonly phase: "staging" | "committed";
 }): Result<void> {
   const { contextPackage, artifacts, store, phase } = input;
   const { manifest, preparedBytes } = contextPackage;
+  if (manifest.runId !== contextPackage.runId) {
+    return failure(
+      "INTEGRITY_ERROR",
+      "Manifest run ID does not match the package run ID",
+      {
+        packageRunId: contextPackage.runId,
+        manifestRunId: manifest.runId
+      }
+    );
+  }
   const parsedManifest = canonicalManifestSchema.safeParse(manifest);
   if (!parsedManifest.success) {
     return failure("INTEGRITY_ERROR", "Manifest contract validation failed", {
@@ -180,6 +199,102 @@ export function validateContextPackage(input: {
         { artifactId: artifactManifest.artifactId }
       );
     }
+  }
+
+  const prompt = artifacts.find((artifact) => artifact.role === "prompt");
+  if (prompt === undefined) {
+    return failure("INTEGRITY_ERROR", "Manifest has no prompt artifact");
+  }
+  const recomputedClassifications = artifacts.map(classifyArtifact);
+  const recomputedClassificationMap = new Map(
+    recomputedClassifications.map((classification) => [
+      classification.artifactId,
+      classification
+    ])
+  );
+  const recomputedArtifactOutcomes = new Map(
+    artifacts.map((artifact) => [
+      artifact.artifactId,
+      artifact.role === "prompt" ? "unknown" : determineOutcome([artifact])
+    ])
+  );
+  const contextOutcomes = artifacts
+    .filter((artifact) => artifact.role === "context")
+    .map(
+      (artifact) =>
+        recomputedArtifactOutcomes.get(artifact.artifactId) ?? "unknown"
+    );
+  const recomputedOutcome = contextOutcomes.includes("red")
+    ? "red"
+    : contextOutcomes.length > 0 &&
+        contextOutcomes.every((outcome) => outcome === "green")
+      ? "green"
+      : "unknown";
+  const recomputedEvidence = artifacts.flatMap((artifact) => {
+    const classification = recomputedClassificationMap.get(
+      artifact.artifactId
+    );
+    return classification === undefined
+      ? []
+      : extractEvidence(
+          artifact,
+          classification,
+          recomputedArtifactOutcomes.get(artifact.artifactId) ?? "unknown"
+        );
+  });
+  const recomputedProtected = artifacts.flatMap((artifact) =>
+    buildProtectedRanges(
+      artifact,
+      recomputedEvidence.filter(
+        (item) => item.artifactId === artifact.artifactId
+      ),
+      segmentArtifact(artifact),
+      { nearbySegments: manifest.policy.nearbySegments }
+    )
+  );
+  const recomputedTransforms = artifacts.flatMap((artifact) => {
+    const classification = recomputedClassificationMap.get(
+      artifact.artifactId
+    );
+    if (classification === undefined) return [];
+    return planTransforms(
+      contextPackage.runId,
+      artifact,
+      proposeTransforms(
+        artifact,
+        classification,
+        recomputedArtifactOutcomes.get(artifact.artifactId) ?? "unknown"
+      ),
+      recomputedProtected.filter(
+        (range) => range.artifactId === artifact.artifactId
+      )
+    ).selected;
+  });
+  const manifestArtifactSemantics = manifest.artifacts.map((artifact) => ({
+    artifactId: artifact.artifactId,
+    classification: artifact.classification,
+    outcome: artifact.outcome
+  }));
+  const recomputedArtifactSemantics = artifacts.map((artifact) => ({
+    artifactId: artifact.artifactId,
+    classification: recomputedClassificationMap.get(artifact.artifactId),
+    outcome:
+      recomputedArtifactOutcomes.get(artifact.artifactId) ?? "unknown"
+  }));
+  if (
+    canonicalJson(manifest.intent) !== canonicalJson(classifyIntent(prompt)) ||
+    manifest.outcome !== recomputedOutcome ||
+    canonicalJson(manifestArtifactSemantics) !==
+      canonicalJson(recomputedArtifactSemantics) ||
+    canonicalJson(manifest.evidence) !== canonicalJson(recomputedEvidence) ||
+    canonicalJson(manifest.protectedRanges) !==
+      canonicalJson(recomputedProtected) ||
+    canonicalJson(manifest.transforms) !== canonicalJson(recomputedTransforms)
+  ) {
+    return failure(
+      "INTEGRITY_ERROR",
+      "Manifest classifications, evidence, protection, or plan are not source-derived"
+    );
   }
 
   const evidenceIds = new Set<string>();
@@ -607,6 +722,41 @@ export function validateContextPackage(input: {
     }
   }
 
+  const plans = new Map<string, typeof manifest.transforms>();
+  for (const artifact of artifacts) {
+    plans.set(
+      artifact.artifactId,
+      manifest.transforms.filter(
+        (transform) => transform.artifactId === artifact.artifactId
+      )
+    );
+  }
+  let rerendered;
+  try {
+    rerendered = renderContext(
+      artifacts,
+      plans,
+      manifest.evidence as readonly EvidenceSpan[]
+    );
+  } catch (error) {
+    return failure("INTEGRITY_ERROR", "Deterministic re-render failed", {
+      cause: error instanceof Error ? error.message : String(error)
+    });
+  }
+  if (
+    !rerendered.preparedBytes.equals(preparedBytes) ||
+    canonicalJson(rerendered.outputMappings) !==
+      canonicalJson(manifest.outputMappings) ||
+    canonicalJson(rerendered.evidenceMappings) !==
+      canonicalJson(manifest.evidenceMappings) ||
+    canonicalJson(rerendered.omissions) !== canonicalJson(manifest.omissions)
+  ) {
+    return failure(
+      "INTEGRITY_ERROR",
+      "Prepared output does not match deterministic rendering"
+    );
+  }
+
   const uncompressed = renderContext(
     artifacts,
     new Map<string, readonly never[]>(),
@@ -631,7 +781,7 @@ export function validateContextPackage(input: {
 }
 
 export function verifyStoredRun(
-  store: ContextStore,
+  store: ValidationStore,
   runId: string
 ): Result<ValidatedContextPackage> {
   const storedManifest = store.loadManifest(runId);

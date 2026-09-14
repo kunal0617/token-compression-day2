@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import { classifyArtifact } from "../../src/classify/classify.js";
+import { extractEvidence } from "../../src/evidence/extract.js";
 import { snapshotBytes } from "../../src/intake/intake.js";
+import { buildProtectedRanges } from "../../src/protect/protect.js";
 import { planTransforms } from "../../src/reduce/planner.js";
 import { proposeTransforms } from "../../src/reduce/propose.js";
+import { segmentArtifact } from "../../src/segment/segment.js";
 
 describe("deterministic reduction planning", () => {
   it("selects the same ordered non-overlapping plan every time", () => {
@@ -22,8 +25,9 @@ describe("deterministic reduction planning", () => {
       "green"
     );
 
-    const first = planTransforms(artifact, proposals, []);
+    const first = planTransforms("run-fixed", artifact, proposals, []);
     const second = planTransforms(
+      "run-fixed",
       artifact,
       [...proposals].reverse(),
       []
@@ -51,7 +55,7 @@ describe("deterministic reduction planning", () => {
       classifyArtifact(artifact),
       "unknown"
     );
-    const plan = planTransforms(artifact, proposals, [
+    const plan = planTransforms("run-fixed", artifact, proposals, [
       {
         artifactId: artifact.artifactId,
         startByte: 5,
@@ -123,7 +127,7 @@ describe("deterministic reduction planning", () => {
         classifyArtifact(artifact),
         "unknown"
       );
-      const plan = planTransforms(artifact, proposals, []);
+      const plan = planTransforms("run-fixed", artifact, proposals, []);
       expect(plan.selected).toEqual([]);
       expect(plan.rejectedNonBeneficial.length).toBeGreaterThan(0);
     }
@@ -155,5 +159,85 @@ describe("deterministic reduction planning", () => {
         )
       ).toBe(false);
     }
+  });
+
+  it("never transforms complete diff artifacts", () => {
+    const artifact = snapshotBytes(
+      Buffer.from(
+        [
+          "diff --git a/src/a.ts b/src/a.ts",
+          "--- a/src/a.ts",
+          "+++ b/src/a.ts",
+          "@@ -1,1 +1,6 @@",
+          ...Array.from(
+            { length: 8 },
+            () =>
+              "+const repeatedChangedSourceLine = 'long enough to otherwise fold';"
+          ),
+          ""
+        ].join("\n"),
+        "utf8"
+      ),
+      {
+        ordinal: 1,
+        role: "context",
+        kind: "pasted",
+        label: "change.diff"
+      }
+    );
+    const classification = classifyArtifact(artifact);
+    expect(classification.kind).toBe("diff");
+    expect(proposeTransforms(artifact, classification, "green")).toEqual([]);
+  });
+
+  it("protects embedded diff hunks statefully inside test logs", () => {
+    const artifact = snapshotBytes(
+      Buffer.from(
+        [
+          "FAIL tests/example.test.ts",
+          "diff --git a/src/a.ts b/src/a.ts",
+          "--- a/src/a.ts",
+          "+++ b/src/a.ts",
+          "@@ -1,1 +1,8 @@",
+          " Tests: this is unchanged source context, not a runner summary",
+          ...Array.from(
+            { length: 8 },
+            () =>
+              "+++successChangedSourceLineThatIsLongEnoughToOtherwiseBeFolded"
+          ),
+          "Tests: 1 failed",
+          "Process exited with code 1",
+          ""
+        ].join("\n"),
+        "utf8"
+      ),
+      {
+        ordinal: 1,
+        role: "context",
+        kind: "pasted",
+        label: "mixed.log"
+      }
+    );
+    const classification = classifyArtifact(artifact);
+    expect(classification.kind).toBe("test-log");
+    const segments = segmentArtifact(artifact);
+    const evidence = extractEvidence(artifact, classification, "red");
+    const protectedRanges = buildProtectedRanges(
+      artifact,
+      evidence,
+      segments
+    );
+    const plan = planTransforms(
+      "run-fixed",
+      artifact,
+      proposeTransforms(artifact, classification, "red"),
+      protectedRanges
+    );
+    expect(
+      segments
+        .filter((segment) => segment.ordinal >= 1 && segment.ordinal <= 13)
+        .every((segment) => segment.kind === "diff")
+    ).toBe(true);
+    expect(plan.selected).toEqual([]);
   });
 });

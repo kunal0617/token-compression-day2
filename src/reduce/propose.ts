@@ -379,7 +379,13 @@ export function proposeTransforms(
   classification: ArtifactClassification,
   outcome: RunOutcome
 ): TransformProposal[] {
-  if (artifact.role === "prompt" || artifact.completeness !== "complete") return [];
+  if (
+    artifact.role === "prompt" ||
+    artifact.completeness !== "complete" ||
+    classification.kind === "diff"
+  ) {
+    return [];
+  }
   const lines = splitRawLines(artifact.bytes);
   return [
     ...proposeConsecutiveExact(artifact, lines),

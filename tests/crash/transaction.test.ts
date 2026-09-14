@@ -102,5 +102,104 @@ describe("transaction and visibility failures", () => {
       rmSync(directory, { recursive: true, force: true });
     }
   });
-});
 
+  it("holds a write lock from validation through publication decision", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "ctxo-validation-lock-"));
+    const storePath = join(directory, "context.sqlite");
+    try {
+      const prepared = await prepareContext({
+        promptText: "Inspect this trace.",
+        contextTexts: [
+          {
+            label: "lock.log",
+            text: "long repeated payload for validation locking\n".repeat(100)
+          }
+        ],
+        storePath
+      });
+      expect(prepared.ok).toBe(true);
+      if (!prepared.ok) return;
+      const setup = new DatabaseSync(storePath);
+      setup
+        .prepare(
+          `UPDATE runs
+           SET status='staging', validation_status='pending',
+               committed_at=NULL, receipt_json=NULL
+           WHERE run_id=?`
+        )
+        .run(prepared.value.package.runId);
+      setup.close();
+
+      const store = new ContextStore(storePath);
+      try {
+        expect(store.beginValidation(prepared.value.package.runId).ok).toBe(
+          true
+        );
+        const competing = new DatabaseSync(storePath);
+        competing.exec("PRAGMA busy_timeout=1");
+        expect(() =>
+          competing
+            .prepare("UPDATE manifests SET canonical_json='tampered' WHERE run_id=?")
+            .run(prepared.value.package.runId)
+        ).toThrow();
+        competing.close();
+        expect(
+          store.cancelValidation(
+            prepared.value.package.runId,
+            "intentional lock test"
+          ).ok
+        ).toBe(true);
+        expect("finalizeValidated" in store).toBe(false);
+      } finally {
+        store.close();
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("records a failed run when atomic publication is rejected", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "ctxo-finalize-failure-"));
+    const storePath = join(directory, "context.sqlite");
+    try {
+      const initialized = new ContextStore(storePath);
+      initialized.close();
+      const database = new DatabaseSync(storePath);
+      database.exec(`
+        CREATE TRIGGER fail_publication
+        BEFORE UPDATE OF status ON runs
+        WHEN NEW.status = 'committed'
+        BEGIN
+          SELECT RAISE(ABORT, 'simulated publication failure');
+        END;
+      `);
+      database.close();
+
+      const result = await prepareContext({
+        promptText: "Inspect this trace.",
+        contextTexts: [
+          {
+            label: "publication.log",
+            text: "long repeated payload for publication failure\n".repeat(100)
+          }
+        ],
+        storePath
+      });
+      expect(result.ok).toBe(false);
+
+      const inspection = new DatabaseSync(storePath, { readOnly: true });
+      const runs = inspection
+        .prepare("SELECT status, validation_status FROM runs")
+        .all() as unknown as {
+        status: string;
+        validation_status: string;
+      }[];
+      inspection.close();
+      expect(runs).toEqual([
+        { status: "failed", validation_status: "failed" }
+      ]);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});

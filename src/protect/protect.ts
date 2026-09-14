@@ -73,6 +73,14 @@ export function buildProtectedRanges(
 
   const nearby = options.nearbySegments ?? 1;
   const ranges: MutableProtectedRange[] = [];
+  for (const segment of segments.filter((item) => item.kind === "diff")) {
+    ranges.push({
+      startByte: segment.startByte,
+      endByte: segment.endByte,
+      reasons: new Set(["complete-diff-hunk"]),
+      evidenceIds: new Set()
+    });
+  }
   for (const item of evidence.filter((candidate) => candidate.mandatoryInline)) {
     const containingOrdinals = segments
       .filter(

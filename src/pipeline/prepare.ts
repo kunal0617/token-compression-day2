@@ -116,17 +116,37 @@ export async function prepareContext(input: PrepareInput): Promise<PrepareResult
     ])
   );
   const intent = classifyIntent(prompt);
-  const outcome = determineOutcome(artifacts);
+  const artifactOutcomes = new Map(
+    artifacts.map((artifact) => [
+      artifact.artifactId,
+      artifact.role === "prompt" ? "unknown" : determineOutcome([artifact])
+    ])
+  );
+  const contextOutcomes = artifacts
+    .filter((artifact) => artifact.role === "context")
+    .map((artifact) => artifactOutcomes.get(artifact.artifactId) ?? "unknown");
+  const outcome = contextOutcomes.includes("red")
+    ? "red"
+    : contextOutcomes.length > 0 &&
+        contextOutcomes.every((item) => item === "green")
+      ? "green"
+      : "unknown";
+  const runId = randomUUID();
   const evidence = artifacts.flatMap((artifact) => {
     const classification = classificationMap.get(artifact.artifactId);
     return classification === undefined
       ? []
-      : extractEvidence(artifact, classification, outcome);
+      : extractEvidence(
+          artifact,
+          classification,
+          artifactOutcomes.get(artifact.artifactId) ?? "unknown"
+        );
   });
 
   const protectedRanges: ProtectedRange[] = [];
   const plans = new Map();
   const warnings: string[] = [];
+  const nearbySegments = input.nearbySegments ?? 1;
   for (const artifact of artifacts) {
     const artifactEvidence = evidence.filter(
       (item) => item.artifactId === artifact.artifactId
@@ -136,7 +156,7 @@ export async function prepareContext(input: PrepareInput): Promise<PrepareResult
       artifact,
       artifactEvidence,
       segments,
-      { nearbySegments: input.nearbySegments ?? 1 }
+      { nearbySegments }
     );
     protectedRanges.push(...protection);
     const classification = classificationMap.get(artifact.artifactId);
@@ -147,8 +167,12 @@ export async function prepareContext(input: PrepareInput): Promise<PrepareResult
         { artifactId: artifact.artifactId }
       );
     }
-    const proposals = proposeTransforms(artifact, classification, outcome);
-    const plan = planTransforms(artifact, proposals, protection);
+    const proposals = proposeTransforms(
+      artifact,
+      classification,
+      artifactOutcomes.get(artifact.artifactId) ?? "unknown"
+    );
+    const plan = planTransforms(runId, artifact, proposals, protection);
     plans.set(artifact.artifactId, plan.selected);
     if (plan.rejectedProtected.length > 0) {
       warnings.push(
@@ -187,7 +211,6 @@ export async function prepareContext(input: PrepareInput): Promise<PrepareResult
   );
   if (!tokenMeasurement.ok) return tokenMeasurement;
 
-  const runId = randomUUID();
   const createdAt = new Date().toISOString();
   const artifactManifests: ArtifactManifest[] = artifacts.map((artifact) => {
     const classification = classificationMap.get(artifact.artifactId);
@@ -207,6 +230,7 @@ export async function prepareContext(input: PrepareInput): Promise<PrepareResult
       hasAnsi: artifact.hasAnsi,
       completeness: artifact.completeness,
       completenessReason: artifact.completenessReason,
+      outcome: artifactOutcomes.get(artifact.artifactId) ?? "unknown",
       classification
     };
   });
@@ -220,6 +244,7 @@ export async function prepareContext(input: PrepareInput): Promise<PrepareResult
     artifacts: artifactManifests,
     intent,
     outcome,
+    policy: { nearbySegments },
     evidence,
     protectedRanges,
     transforms,
@@ -270,16 +295,6 @@ export async function prepareContext(input: PrepareInput): Promise<PrepareResult
     });
     if (!staged.ok) return staged;
 
-    const validated = validateContextPackage({
-      contextPackage,
-      artifacts,
-      store,
-      phase: "staging"
-    });
-    if (!validated.ok) {
-      store.markFailed(runId, validated.error.message);
-      return validated;
-    }
     const receipt = buildReceipt({
       runId,
       classifications,
@@ -292,22 +307,16 @@ export async function prepareContext(input: PrepareInput): Promise<PrepareResult
       omissions: rendered.omissions,
       warnings
     });
-    const finalized = store.finalizeValidated(runId, receipt);
-    if (!finalized.ok) {
-      store.markFailed(runId, finalized.error.message);
-      return finalized;
-    }
+    const published = store.publishValidated({
+      contextPackage,
+      artifacts,
+      receipt
+    });
+    if (!published.ok) return published;
     return {
       ok: true,
       value: {
-        package: {
-          ...contextPackage,
-          validation: {
-            status: "validated",
-            reconstruction: "byte-identical",
-            committed: true
-          }
-        },
+        package: published.value,
         receipt
       }
     };

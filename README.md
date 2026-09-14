@@ -29,9 +29,16 @@ provider. Its provider-neutral handoff port accepts only a
   occurrence has its own byte-identical literal mapping.
 - Validation reconstructs every artifact byte-for-byte and remeasures actual
   `o200k_base` tokens before a package becomes ready.
+- Outcomes are artifact-local: red wins the aggregate receipt, while an
+  unrelated green artifact cannot authorize warning folding in an unknown one.
+- Validated output paths are checked against the store, WAL/SHM sidecars, and
+  canonical file identity before any write.
 
 See [architecture](docs/architecture.md) and the
-[integrity model](docs/integrity-model.md).
+[integrity model](docs/integrity-model.md). A source-backed
+[comparison with Rohit's implementation](docs/comparison-with-rohit.md)
+separates verified strengths, reproduced risks, recommendations, and
+unverified possibilities.
 
 ## CLI
 

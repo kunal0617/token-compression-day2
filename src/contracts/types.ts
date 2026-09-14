@@ -200,6 +200,7 @@ export interface ArtifactManifest {
   readonly hasAnsi: boolean;
   readonly completeness: "complete" | "truncated" | "unknown";
   readonly completenessReason: string;
+  readonly outcome: RunOutcome;
   readonly classification: ArtifactClassification;
 }
 
@@ -210,6 +211,9 @@ export interface CanonicalManifest {
   readonly artifacts: readonly ArtifactManifest[];
   readonly intent: IntentClassification;
   readonly outcome: RunOutcome;
+  readonly policy: {
+    readonly nearbySegments: number;
+  };
   readonly evidence: readonly EvidenceSpan[];
   readonly protectedRanges: readonly ProtectedRange[];
   readonly transforms: readonly PlannedTransform[];

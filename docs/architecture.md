@@ -29,7 +29,7 @@ hashes, slicing, mappings, retrieval, and reconstruction use original bytes.
 |---|---|---|
 | `contracts` | Serializable domain contracts and Zod schemas | No filesystem or SQLite |
 | `intake` | Raw-byte capture, canonical paths, UTF-8 and metadata | Filesystem adapter |
-| `classify` | Deterministic artifact, intent, and outcome reasons | Pure |
+| `classify` | Deterministic artifact, intent, and artifact-local outcome reasons | Pure |
 | `evidence` | Exact occurrence extraction and hashes | Pure |
 | `segment` / `protect` | Structural lines and protected closure | Pure |
 | `reduce` | Proposals, benefit checks, and overlap resolution | Pure |
@@ -46,10 +46,13 @@ hashes, slicing, mappings, retrieval, and reconstruction use original bytes.
    mappings, and canonical manifest in one `BEGIN IMMEDIATE` transaction.
 2. The durable row remains `staging/pending`. Public manifest, receipt, compact
    output, and handle APIs cannot read it.
-3. Validation uses run-scoped staging reads, including every omission through
-   its real SQLite handle path.
-4. `finalizeValidated` atomically writes the receipt and changes the run to
-   `committed/validated`.
+3. Store-owned `publishValidated` acquires a SQLite write lock and runs the
+   validator. Validation uses run-scoped staging reads, including every
+   omission through its real SQLite handle path, while competing writes remain
+   blocked.
+4. A private finalizer writes the receipt, changes the run to
+   `committed/validated`, and commits the held transaction. Callers cannot
+   publish without executing validation.
 5. Any validation failure changes only that staging run to `failed`. A staging
    crash remains invisible to public reads.
 
@@ -60,3 +63,6 @@ ranking, markers, and mappings are source-derived. A run UUID and creation time
 identify an execution, so canonical manifests from separate executions are not
 expected to have the same digest even when the deterministic plan is equal.
 
+Outcomes are computed per context artifact. Red wins the aggregate receipt;
+green plus unknown aggregates to unknown, and green-only reduction rules apply
+only to the artifact whose own authoritative outcome is green.

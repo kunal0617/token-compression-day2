@@ -1,6 +1,13 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
-import { snapshotBytes } from "../../src/intake/intake.js";
+import {
+  intakeUtf8File,
+  snapshotBytes
+} from "../../src/intake/intake.js";
 import { splitRawLines } from "../../src/segment/segment.js";
 
 describe("raw-byte intake", () => {
@@ -40,6 +47,22 @@ describe("raw-byte intake", () => {
     expect(artifact.utf8).toBe("invalid");
   });
 
+  it("rejects an invalid UTF-8 file without fallback or truncation", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "ctxo-invalid-utf8-"));
+    const path = join(directory, "invalid.txt");
+    try {
+      writeFileSync(path, Buffer.from([0x61, 0xc3, 0x28, 0x62]));
+      const result = await intakeUtf8File(path, {
+        ordinal: 1,
+        role: "context"
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error.code).toBe("INVALID_UTF8");
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("supports a megabyte line without truncation", () => {
     const bytes = Buffer.from("x".repeat(1024 * 1024), "utf8");
     const artifact = snapshotBytes(bytes, {
@@ -54,4 +77,3 @@ describe("raw-byte intake", () => {
     expect(splitRawLines(bytes)).toHaveLength(1);
   });
 });
-

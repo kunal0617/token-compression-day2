@@ -25,6 +25,7 @@ function markerFor(transform: {
 }
 
 export function planTransforms(
+  runId: string,
   artifact: ArtifactSnapshot,
   proposals: readonly TransformProposal[],
   protectedRanges: readonly ProtectedRange[]
@@ -73,7 +74,7 @@ export function planTransforms(
       );
       const omittedSha256 = sha256Base64Url(omitted);
       const occurrenceId = `omission-${sha256Text(
-        `${artifact.artifactId}:${candidate.startByte}:${candidate.endByte}:${candidate.reason}`
+        `${runId}:${artifact.artifactId}:${candidate.startByte}:${candidate.endByte}:${candidate.reason}`
       )}`;
       const handle = createHandle(
         omittedSha256,

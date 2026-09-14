@@ -1,4 +1,6 @@
-import { writeFile } from "node:fs/promises";
+#!/usr/bin/env node
+
+import { realpath, stat, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -89,6 +91,65 @@ function defaultStore(parsed: ParsedArgs): Result<string> {
   );
 }
 
+function normalizedPath(path: string): string {
+  const absolute = resolve(path);
+  return process.platform === "win32" ? absolute.toLowerCase() : absolute;
+}
+
+function directlyCollidesWithStore(storePath: string, outputPath: string): boolean {
+  const output = normalizedPath(outputPath);
+  const store = normalizedPath(storePath);
+  return [store, `${store}-wal`, `${store}-shm`].includes(output);
+}
+
+async function canonicalOutputCollision(
+  storePath: string,
+  outputPath: string
+): Promise<boolean> {
+  if (directlyCollidesWithStore(storePath, outputPath)) return true;
+  try {
+    const [outputRealPath, outputStat] = await Promise.all([
+      realpath(outputPath),
+      stat(outputPath)
+    ]);
+    for (const candidate of [storePath, `${storePath}-wal`, `${storePath}-shm`]) {
+      try {
+        const [candidateRealPath, candidateStat] = await Promise.all([
+          realpath(candidate),
+          stat(candidate)
+        ]);
+        if (
+          normalizedPath(candidateRealPath) === normalizedPath(outputRealPath) ||
+          (candidateStat.dev === outputStat.dev &&
+            candidateStat.ino === outputStat.ino)
+        ) {
+          return true;
+        }
+      } catch (error) {
+        const code =
+          typeof error === "object" &&
+          error !== null &&
+          "code" in error &&
+          typeof error.code === "string"
+            ? error.code
+            : undefined;
+        if (code !== "ENOENT") throw error;
+      }
+    }
+    return false;
+  } catch (error) {
+    const code =
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      typeof error.code === "string"
+        ? error.code
+        : undefined;
+    if (code === "ENOENT") return false;
+    throw error;
+  }
+}
+
 function writeJson(io: CliIo, value: unknown): void {
   io.stdout(`${JSON.stringify(value, null, 2)}\n`);
 }
@@ -121,6 +182,19 @@ function positiveIntegerOption(
     : failure("INVALID_ARGUMENT", `--${name} must be a positive integer`);
 }
 
+function nonnegativeIntegerOption(
+  parsed: ParsedArgs,
+  name: string
+): Result<number | undefined> {
+  const option = oneOption(parsed, name);
+  if (!option.ok) return option;
+  if (option.value === undefined) return success(undefined);
+  const value = Number(option.value);
+  return Number.isSafeInteger(value) && value >= 0
+    ? success(value)
+    : failure("INVALID_ARGUMENT", `--${name} must be a nonnegative integer`);
+}
+
 async function runPrepare(parsed: ParsedArgs, io: CliIo): Promise<number> {
   const known = rejectUnknownOptions(parsed, [
     "prompt-file",
@@ -139,7 +213,7 @@ async function runPrepare(parsed: ParsedArgs, io: CliIo): Promise<number> {
     parsed,
     "max-artifact-bytes"
   );
-  const nearby = positiveIntegerOption(parsed, "nearby");
+  const nearby = nonnegativeIntegerOption(parsed, "nearby");
   if (!known.ok || parsed.positionals.length > 0) {
     io.stderr(
       `${
@@ -182,6 +256,24 @@ async function runPrepare(parsed: ParsedArgs, io: CliIo): Promise<number> {
     );
     return 2;
   }
+  if (
+    output.value !== undefined &&
+    directlyCollidesWithStore(store.value, output.value)
+  ) {
+    io.stderr(
+      "INVALID_ARGUMENT: --output must not overwrite the SQLite store or its WAL/SHM files\n"
+    );
+    return 2;
+  }
+  if (
+    output.value !== undefined &&
+    (await canonicalOutputCollision(store.value, resolve(output.value)))
+  ) {
+    io.stderr(
+      "INVALID_ARGUMENT: --output aliases the SQLite store or one of its sidecar files\n"
+    );
+    return 2;
+  }
 
   const result = await prepareContext({
     ...(promptFile.value === undefined
@@ -206,6 +298,17 @@ async function runPrepare(parsed: ParsedArgs, io: CliIo): Promise<number> {
   }
   if (output.value !== undefined) {
     try {
+      if (
+        await canonicalOutputCollision(
+          store.value,
+          resolve(output.value)
+        )
+      ) {
+        io.stderr(
+          "INVALID_ARGUMENT: --output aliases the validated SQLite store\n"
+        );
+        return 2;
+      }
       await writeFile(resolve(output.value), result.value.package.preparedBytes);
     } catch (error) {
       io.stderr(

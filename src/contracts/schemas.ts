@@ -181,6 +181,7 @@ const artifactManifestSchema = z
     hasAnsi: z.boolean(),
     completeness: z.enum(["complete", "truncated", "unknown"]),
     completenessReason: z.string().min(1),
+    outcome: z.enum(["green", "red", "unknown"]),
     classification: artifactClassificationSchema
   })
   .strict();
@@ -202,6 +203,11 @@ export const canonicalManifestSchema = z
     artifacts: z.array(artifactManifestSchema),
     intent: intentClassificationSchema,
     outcome: z.enum(["green", "red", "unknown"]),
+    policy: z
+      .object({
+        nearbySegments: z.number().int().nonnegative()
+      })
+      .strict(),
     evidence: z.array(evidenceSchema),
     protectedRanges: z.array(protectedRangeSchema),
     transforms: z.array(plannedTransformSchema),

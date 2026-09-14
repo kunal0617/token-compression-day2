@@ -76,7 +76,7 @@ export function buildFailureObligationSpecs(
 ): readonly EvidenceObligationSpec[] {
   const specs: EvidenceObligationSpec[] = [];
   for (const report of input.reports) {
-    if (!report.recognized) {
+    if (!report.recognized && report.fallbackRanges.length > 0) {
       specs.push(
         spec(
           "failure-block",

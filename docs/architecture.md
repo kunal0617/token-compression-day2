@@ -38,6 +38,7 @@ hashes, slicing, mappings, retrieval, and reconstruction use original bytes.
 | `obligations` | CQ-03/CQ-06 explicit sufficiency statuses and bounded Gather More Evidence policy | Pure evaluator + retrieval ports |
 | `source` | CQ-05 Tree-sitter units, TypeScript semantic edges, bounded delivery planning, and language fallback | Pure providers |
 | `approval` | CQ-07 captured/current selection, diff3 merge, canonical review subject, and stale approval rejection | Pure state transition |
+| `tui` | Terminal receipt/diff/evidence/gap/retrieval/target review and digest-bound actions | Terminal adapter + pure controller |
 | `segment` / `protect` | Structural lines and protected closure | Pure |
 | `reduce` | Proposals, benefit checks, and overlap resolution | Pure |
 | `render` | One compact render and mapping creation | Pure |
@@ -85,10 +86,13 @@ adapters, and evaluation adapters share immutable producer metadata:
 contract/rule set. Detectors emit findings only; the deterministic policy layer
 turns reduction findings into a final non-overlapping plan.
 
-New runs use manifest format v2 and persist the complete sorted producer set in
-both the canonical manifest and `run_producers`. Validation recomputes the
-built-in registry digest and checks the staged/committed rows. Legacy v1 runs
-contain no producer registry and remain supported without fabricating metadata.
+New runs use manifest format v2 and persist only the sorted producers that
+actually participated in preparation, both in the canonical manifest and
+`run_producers`. Metadata is snapshotted, validated, and frozen on registration;
+ordering uses UTF-8 binary comparison to match SQLite `BINARY`. Historical
+producers resolve by `(producerId, version, digest)`, so unrelated registry
+growth cannot invalidate an old run. Legacy v1 runs contain no producer
+registry and remain supported without fabricating metadata.
 
 Outcomes are computed per context artifact. Red wins the aggregate receipt;
 green plus unknown aggregates to unknown, and green-only reduction rules apply

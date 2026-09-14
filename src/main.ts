@@ -5,9 +5,18 @@ import { basename, dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { prepareContext } from "./pipeline/prepare.js";
+import { sha256Base64Url } from "./core/hash.js";
 import { failure, success, type Result } from "./core/result.js";
+import { renderContext } from "./render/render.js";
 import { ContextStore } from "./storage/store.js";
-import { verifyStoredRun } from "./validate/validate.js";
+import {
+  snapshotsFromManifest,
+  verifyStoredRun
+} from "./validate/validate.js";
+import {
+  runTerminalReview,
+  TerminalReviewController
+} from "./tui/review.js";
 
 export const HELP = `Context Overflow POC
 
@@ -17,6 +26,7 @@ Usage:
   context-overflow inspect --run <run-id> [--store <path>]
   context-overflow retrieve <handle> [--store <path>]
   context-overflow verify --run <run-id> [--store <path>]
+  context-overflow review --run <run-id> [--store <path>] [--adapter <id>] [--session <id>] [--model <id>] [--cwd <path>] [--permissions <csv>]
 
 Defaults:
   --store .context-overflow/context-overflow.sqlite
@@ -491,6 +501,146 @@ function runRetrieve(parsed: ParsedArgs, io: CliIo): number {
   return 0;
 }
 
+function permissionEnvelope(value: string | undefined) {
+  const permissions = new Set(
+    (value ?? "source,evidence")
+      .split(",")
+      .map((permission) => permission.trim().toLowerCase())
+      .filter(Boolean)
+  );
+  return {
+    sourceRead: permissions.has("source"),
+    evidenceRead: permissions.has("evidence"),
+    fileWrite: permissions.has("write"),
+    shell: permissions.has("shell"),
+    network: permissions.has("network")
+  };
+}
+
+async function runReview(parsed: ParsedArgs, io: CliIo): Promise<number> {
+  const known = rejectUnknownOptions(parsed, [
+    "run",
+    "store",
+    "adapter",
+    "session",
+    "model",
+    "cwd",
+    "permissions"
+  ]);
+  if (!known.ok || parsed.positionals.length > 0) {
+    io.stderr(
+      `${
+        known.ok
+          ? "INVALID_ARGUMENT: review does not accept positional arguments"
+          : `${known.error.code}: ${known.error.message}`
+      }\n`
+    );
+    return 2;
+  }
+  const run = oneOption(parsed, "run", true);
+  const storePath = defaultStore(parsed);
+  const adapter = oneOption(parsed, "adapter");
+  const session = oneOption(parsed, "session");
+  const model = oneOption(parsed, "model");
+  const cwd = oneOption(parsed, "cwd");
+  const permissions = oneOption(parsed, "permissions");
+  if (!run.ok) {
+    io.stderr(`${run.error.code}: ${run.error.message}\n`);
+    return 2;
+  }
+  if (!storePath.ok) {
+    io.stderr(`${storePath.error.code}: ${storePath.error.message}\n`);
+    return 2;
+  }
+  for (const option of [adapter, session, model, cwd, permissions]) {
+    if (!option.ok) {
+      io.stderr(`${option.error.code}: ${option.error.message}\n`);
+      return 2;
+    }
+  }
+  if (!adapter.ok || !session.ok || !model.ok || !cwd.ok || !permissions.ok) {
+    return 2;
+  }
+  let store: ContextStore;
+  try {
+    store = new ContextStore(storePath.value);
+  } catch (error) {
+    io.stderr(
+      `STORAGE_ERROR: ${
+        error instanceof Error ? error.message : String(error)
+      }\n`
+    );
+    return 1;
+  }
+  try {
+    const verified = verifyStoredRun(store, run.value as string);
+    if (!verified.ok) {
+      io.stderr(`${verified.error.code}: ${verified.error.message}\n`);
+      return 1;
+    }
+    const receipt = store.inspectReceipt(run.value as string);
+    if (!receipt.ok) {
+      io.stderr(`${receipt.error.code}: ${receipt.error.message}\n`);
+      return 1;
+    }
+    const bytes = store.loadArtifactBytes(run.value as string);
+    if (!bytes.ok) {
+      io.stderr(`${bytes.error.code}: ${bytes.error.message}\n`);
+      return 1;
+    }
+    const snapshots = snapshotsFromManifest(
+      verified.value.manifest,
+      bytes.value
+    );
+    if (!snapshots.ok) {
+      io.stderr(`${snapshots.error.code}: ${snapshots.error.message}\n`);
+      return 1;
+    }
+    const original = renderContext(
+      snapshots.value,
+      new Map<string, readonly never[]>(),
+      verified.value.manifest.evidence
+    ).preparedBytes;
+    const controller = new TerminalReviewController(
+      {
+        contextPackage: verified.value,
+        receipt: receipt.value,
+        originalBytes: original,
+        artifacts: snapshots.value,
+        target: {
+          adapterId: adapter.value ?? "offline",
+          ...(session.value === undefined
+            ? {}
+            : { sessionId: session.value }),
+          ...(model.value === undefined ? {} : { modelId: model.value }),
+          workingDirectory: resolve(cwd.value ?? process.cwd()),
+          permissions: permissionEnvelope(permissions.value)
+        }
+      },
+      store
+    );
+    const reviewed = await runTerminalReview(controller);
+    if (!reviewed.ok) {
+      io.stderr(`${reviewed.error.code}: ${reviewed.error.message}\n`);
+      return 1;
+    }
+    if (reviewed.value === undefined) {
+      writeJson(io, { runId: run.value, status: controller.view().status });
+    } else {
+      writeJson(io, {
+        runId: run.value,
+        status: "approved",
+        reviewSubjectDigest: reviewed.value.subject.digest,
+        approvalDigest: reviewed.value.approval.digest,
+        payloadSha256: sha256Base64Url(reviewed.value.bytes)
+      });
+    }
+    return 0;
+  } finally {
+    store.close();
+  }
+}
+
 function runVerify(parsed: ParsedArgs, io: CliIo): number {
   const known = rejectUnknownOptions(parsed, ["run", "store"]);
   if (!known.ok || parsed.positionals.length > 0) {
@@ -556,6 +706,8 @@ export async function runCli(
       return runRetrieve(parsed.value, io);
     case "verify":
       return runVerify(parsed.value, io);
+    case "review":
+      return runReview(parsed.value, io);
     default:
       io.stderr(`Unknown command: ${parsed.value.command ?? ""}\n\n${HELP}`);
       return 2;

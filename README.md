@@ -157,6 +157,19 @@ directory, permission envelope, and snapshot choice. Approval records bind that
 digest and approved payload hash. Any source, payload, policy, target, model,
 directory, permission, or selection change invalidates the approval.
 
+## Terminal review TUI
+
+`context-overflow review --run <id>` opens an offline terminal review over a
+committed run. It exposes the receipt summary, source-aligned omission diff,
+evidence, transforms, handles/retrieval, gaps, conflicts, security state, model
+advice, target session/model, working directory, and permissions.
+
+The controller supports prepared/original approval, Gather More Evidence,
+snapshot selection, editable merged results, handle retrieval, target changes,
+reject, and cancel. Blocking obligations prevent approval, edits and target
+changes clear prior approval, and no payload bytes are returned for handoff
+unless the current approval digest revalidates.
+
 For CI summary logs, routine path/version/timestamp/identifier occurrences stay
 in the manifest but do not automatically protect neighboring lines. Source
 locations require credible file extensions or diagnostic/stack/compiler

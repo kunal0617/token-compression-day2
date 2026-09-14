@@ -72,7 +72,7 @@ describe("CQ-05 JS/TS source scope", () => {
       document(
         "entry",
         "virtual/entry.ts",
-        'import type { Config } from "./config";\nexport function run(config: Config) { return config.enabled; }\n'
+        'import type { Config } from "./config.js";\nexport function run(config: Config) { return config.enabled; }\n'
       ),
       document(
         "config",
@@ -111,7 +111,7 @@ describe("CQ-05 JS/TS source scope", () => {
       document(
         "entry",
         "virtual/entry.ts",
-        'import type { Config } from "./config";\nexport function run(config: Config) { return config.enabled; }\n'
+        'import type { Config } from "./config.js";\nimport { unrelated } from "./unrelated";\nexport function run(config: Config) { return config.enabled; }\n'
       ),
       document(
         "config",
@@ -149,6 +149,43 @@ describe("CQ-05 JS/TS source scope", () => {
     expect(plan.value.totalBytes).toBeLessThanOrEqual(fullRules.maxBytes);
   });
 
+  it("resolves aliases and re-exports through .js specifiers", () => {
+    const documents = [
+      document(
+        "entry",
+        "virtual/alias-entry.ts",
+        'import { renamed } from "./barrel.js";\nexport const value = renamed();\n'
+      ),
+      document(
+        "barrel",
+        "virtual/barrel.ts",
+        'export { original as renamed } from "./implementation.js";\n'
+      ),
+      document(
+        "implementation",
+        "virtual/implementation.ts",
+        "export function original() { return 1; }\n"
+      )
+    ];
+    const edges = typeScriptSemanticEdgeProvider.edges({ documents });
+    expect(edges.ok).toBe(true);
+    if (!edges.ok) return;
+    expect(
+      edges.value.some(
+        (edge) =>
+          edge.fromSourceId === "entry" &&
+          edge.toSourceId === "barrel"
+      )
+    ).toBe(true);
+    expect(
+      edges.value.some(
+        (edge) =>
+          edge.fromSourceId === "barrel" &&
+          edge.toSourceId === "implementation"
+      )
+    ).toBe(true);
+  });
+
   it("uses an explicit exact whole-file fallback for other languages", () => {
     const source = document(
       "python",
@@ -167,5 +204,60 @@ describe("CQ-05 JS/TS source scope", () => {
         .subarray(units.value[0]?.startByte, units.value[0]?.endByte)
         .equals(source.bytes)
     ).toBe(true);
+  });
+
+  it("enforces maxFiles across explicit roots before semantic expansion", () => {
+    const first = document(
+      "first",
+      "virtual/first.ts",
+      "export const first = 1;\n"
+    );
+    const second = document(
+      "second",
+      "virtual/second.ts",
+      "export const second = 2;\n"
+    );
+    const plan = buildDeliveryPlan({
+      documents: [first, second],
+      roots: [{ sourceId: "first" }, { sourceId: "second" }],
+      rules: { ...fullRules, maxFiles: 1 }
+    });
+    expect(plan.ok).toBe(false);
+  });
+
+  it("validates document identity, copies slices, and fails roots over maxBytes", () => {
+    const source = document(
+      "identity",
+      "virtual/identity.ts",
+      "export function target() { return 1; }\n"
+    );
+    const invalid = {
+      ...source,
+      identity: { ...source.identity, sha256: "A".repeat(43) }
+    };
+    expect(
+      buildDeliveryPlan({
+        documents: [invalid],
+        roots: [{ sourceId: "identity", symbol: "target" }],
+        rules: fullRules
+      }).ok
+    ).toBe(false);
+    expect(
+      buildDeliveryPlan({
+        documents: [source],
+        roots: [{ sourceId: "identity", symbol: "target" }],
+        rules: { ...fullRules, maxBytes: 4 }
+      }).ok
+    ).toBe(false);
+    const plan = buildDeliveryPlan({
+      documents: [source],
+      roots: [{ sourceId: "identity", symbol: "target" }],
+      rules: fullRules
+    });
+    expect(plan.ok).toBe(true);
+    if (!plan.ok) return;
+    const before = Buffer.from(plan.value.slices[0]?.bytes ?? []);
+    source.bytes.fill(0x78);
+    expect(plan.value.slices[0]?.bytes.equals(before)).toBe(true);
   });
 });

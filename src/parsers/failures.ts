@@ -184,12 +184,55 @@ export class VitestJestFailureDetector
       const actual =
         /^\s*(?:Received|Actual):\s*([\s\S]+)$/i.exec(text)?.[1];
       if (currentTest !== undefined && expected !== undefined) {
-        currentTest = { ...currentTest, expected };
+        currentTest = {
+          ...currentTest,
+          expected,
+          endByte: range.endByte
+        };
         tests[tests.length - 1] = currentTest;
       }
       if (currentTest !== undefined && actual !== undefined) {
-        currentTest = { ...currentTest, actual };
+        currentTest = {
+          ...currentTest,
+          actual,
+          endByte: range.endByte
+        };
         tests[tests.length - 1] = currentTest;
+      }
+      if (
+        currentTest !== undefined &&
+        /^\s*[+-](?![+-])/.test(text)
+      ) {
+        currentTest = {
+          ...currentTest,
+          diff:
+            currentTest.diff === undefined
+              ? text
+              : `${currentTest.diff}\n${text}`,
+          endByte: range.endByte
+        };
+        tests[tests.length - 1] = currentTest;
+      }
+      const testLocation = locationFromText(text);
+      if (
+        currentTest !== undefined &&
+        testLocation !== undefined &&
+        /^\s*at\s+/.test(text)
+      ) {
+        currentTest = {
+          ...currentTest,
+          location: testLocation,
+          endByte: range.endByte
+        };
+        tests[tests.length - 1] = currentTest;
+      }
+      if (
+        currentTest !== undefined &&
+        /\b(?:Tests?|Test Suites?|Test Files)\s*:/i.test(text)
+      ) {
+        currentTest = { ...currentTest, endByte: range.endByte };
+        tests[tests.length - 1] = currentTest;
+        currentTest = undefined;
       }
       const command = commandFromText(text, range);
       if (command !== undefined) commands.push(command);
@@ -197,6 +240,9 @@ export class VitestJestFailureDetector
       if (environmentFact !== undefined) environment.push(environmentFact);
     }
     const exitCode = finalExit(analyses);
+    if (tests.length === 0) {
+      return success({ producer: this.metadata, findings: [], warnings: [] });
+    }
     if (commands.length > 0 && exitCode !== undefined) {
       commands[commands.length - 1] = {
         ...(commands.at(-1) as ParsedCommand),
@@ -255,7 +301,7 @@ function parseExceptions(
   let current: MutableException | undefined;
   for (const analysis of analyses) {
     const match =
-      /^\s*(?:Caused by:\s*)?([A-Za-z_$][\w.$]*(?:Error|Exception|Failure)|Error|Exception|Failure):\s*(.*)$/.exec(
+      /^\s*(?:Caused by:\s*)?([A-Za-z_$][\w.$]*(?:Error|Exception|Failure)|Error|Exception|Failure)(?:\s+\[([A-Z0-9_]+)\])?:\s*(.*)$/.exec(
         analysis.content
       );
     if (match?.[1] !== undefined) {
@@ -263,7 +309,8 @@ function parseExceptions(
         startByte: analysis.line.startByte,
         endByte: analysis.line.endByte,
         type: match[1],
-        message: match[2] ?? "",
+        message: match[3] ?? "",
+        ...(match[2] === undefined ? {} : { code: match[2] }),
         frames: [],
         causes: []
       };
@@ -313,9 +360,7 @@ export class NodeV8FailureDetector
   ): Result<DetectorResult<FailureReport>> {
     const analyses = analyzeCiLines(request.artifact);
     const exceptions = parseExceptions(request.artifact);
-    const recognized =
-      exceptions.length > 0 ||
-      analyses.some((line) => /\b(?:ERR_[A-Z_]+|node:internal)\b/.test(line.content));
+    const recognized = exceptions.length > 0;
     if (!recognized) {
       return success({ producer: this.metadata, findings: [], warnings: [] });
     }
@@ -388,6 +433,9 @@ export class ConservativeFailureFallbackDetector
     const fallbackRanges = analyses
       .filter((line) =>
         /\b(?:error|failure|failed|fatal|panic|cancelled|timed_out)\b/i.test(
+          line.content
+        ) ||
+        /\b[A-Za-z_$][\w.$]*(?:Error|Exception|Failure)(?:\s+\[[A-Z0-9_]+\])?:/i.test(
           line.content
         )
       )

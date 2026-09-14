@@ -114,6 +114,16 @@ export function buildDeliveryPlan(input: {
   const units: CodeUnit[] = [];
   const warnings: string[] = [];
   for (const document of input.documents) {
+    if (
+      document.identity.byteLength !== document.bytes.length ||
+      document.identity.sha256 !== sha256Base64Url(document.bytes)
+    ) {
+      return failure(
+        "INTEGRITY_ERROR",
+        "Source document identity does not match its bytes",
+        { sourceId: document.sourceId }
+      );
+    }
     const structured = treeSitterJsTsStructureProvider.units({ document });
     if (!structured.ok) return structured;
     if (structured.value.length > 0) {
@@ -130,8 +140,22 @@ export function buildDeliveryPlan(input: {
   });
   if (!semantic.ok) return semantic;
   const selectedUnits = new Map<string, CodeUnit>();
+  const rootUnitIds = new Set<string>();
   const selectedSources = new Set<string>();
-  const queue: { sourceId: string; depth: number }[] = [];
+  const queue: {
+    sourceId: string;
+    startByte: number;
+    endByte: number;
+    depth: number;
+  }[] = [];
+  const rootSourceIds = new Set(input.roots.map((root) => root.sourceId));
+  if (rootSourceIds.size > input.rules.maxFiles) {
+    return failure(
+      "LIMIT_EXCEEDED",
+      "Delivery roots exceed the maxFiles bound",
+      { roots: rootSourceIds.size, maxFiles: input.rules.maxFiles }
+    );
+  }
   for (const root of input.roots) {
     const document = documents.get(root.sourceId);
     if (document === undefined) {
@@ -146,9 +170,17 @@ export function buildDeliveryPlan(input: {
         symbol: root.symbol ?? null
       });
     }
-    for (const unit of matches) selectedUnits.set(unit.unitId, unit);
+    for (const unit of matches) {
+      selectedUnits.set(unit.unitId, unit);
+      rootUnitIds.add(unit.unitId);
+      queue.push({
+        sourceId: unit.sourceId,
+        startByte: unit.startByte,
+        endByte: unit.endByte,
+        depth: 0
+      });
+    }
     selectedSources.add(root.sourceId);
-    queue.push({ sourceId: root.sourceId, depth: 0 });
   }
   while (queue.length > 0) {
     const current = queue.shift();
@@ -156,15 +188,31 @@ export function buildDeliveryPlan(input: {
     const candidateEdges = semantic.value.filter(
       (edge) =>
         allowedEdge(edge, input.rules) &&
-        (edge.fromSourceId === current.sourceId ||
-          (edge.kind === "test" && edge.toSourceId === current.sourceId))
+        ((edge.fromSourceId === current.sourceId &&
+          rangesIntersect(
+            {
+              startByte: edge.fromStartByte,
+              endByte: edge.fromEndByte
+            },
+            current
+          )) ||
+          (edge.kind === "test" &&
+            edge.toSourceId === current.sourceId &&
+            rangesIntersect(
+              {
+                startByte: edge.toStartByte,
+                endByte: edge.toEndByte
+              },
+              current
+            )))
     );
     for (const edge of candidateEdges) {
       const targetSourceId =
         edge.kind === "test" && edge.toSourceId === current.sourceId
           ? edge.fromSourceId
           : edge.toSourceId;
-      if (!selectedSources.has(targetSourceId)) {
+      const targetAlreadySelected = selectedSources.has(targetSourceId);
+      if (!targetAlreadySelected) {
         if (selectedSources.size >= input.rules.maxFiles) {
           warnings.push(
             `File bound omitted semantic target ${targetSourceId}`
@@ -172,17 +220,34 @@ export function buildDeliveryPlan(input: {
           continue;
         }
         selectedSources.add(targetSourceId);
-        queue.push({ sourceId: targetSourceId, depth: current.depth + 1 });
       }
+      if (targetAlreadySelected) continue;
+      const targetRange =
+        edge.kind === "test" && edge.toSourceId === current.sourceId
+          ? {
+              startByte: edge.fromStartByte,
+              endByte: edge.fromEndByte
+            }
+          : {
+              startByte: edge.toStartByte,
+              endByte: edge.toEndByte
+            };
       const targetUnits = units.filter(
         (unit) =>
           unit.sourceId === targetSourceId &&
-          rangesIntersect(unit, {
-            startByte: edge.toStartByte,
-            endByte: edge.toEndByte
-          })
+          rangesIntersect(unit, targetRange)
       );
-      for (const unit of targetUnits) selectedUnits.set(unit.unitId, unit);
+      for (const unit of targetUnits) {
+        if (!selectedUnits.has(unit.unitId)) {
+          selectedUnits.set(unit.unitId, unit);
+          queue.push({
+            sourceId: unit.sourceId,
+            startByte: unit.startByte,
+            endByte: unit.endByte,
+            depth: current.depth + 1
+          });
+        }
+      }
     }
   }
   const slices: DeliverySlice[] = [];
@@ -195,10 +260,17 @@ export function buildDeliveryPlan(input: {
     );
     for (const slice of mergeUnits(document, sourceUnits)) {
       if (totalBytes + slice.bytes.length > input.rules.maxBytes) {
+        if (slice.unitIds.some((unitId) => rootUnitIds.has(unitId))) {
+          return failure(
+            "LIMIT_EXCEEDED",
+            "Mandatory delivery root exceeds maxBytes",
+            { sourceId, maxBytes: input.rules.maxBytes }
+          );
+        }
         warnings.push(`Byte bound omitted ${document.path}`);
         continue;
       }
-      slices.push(slice);
+      slices.push({ ...slice, bytes: Buffer.from(slice.bytes) });
       totalBytes += slice.bytes.length;
     }
   }
@@ -212,7 +284,11 @@ export function buildDeliveryPlan(input: {
         selectedSources.has(edge.toSourceId)
     ),
     omittedSourceIds: input.documents
-      .filter((document) => !selectedSources.has(document.sourceId))
+      .filter(
+        (document) =>
+          !selectedSources.has(document.sourceId) ||
+          !slices.some((slice) => slice.sourceId === document.sourceId)
+      )
       .map((document) => document.sourceId)
       .sort(),
     totalBytes,
@@ -224,4 +300,3 @@ export function buildDeliveryPlan(input: {
     ]
   });
 }
-

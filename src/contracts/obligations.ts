@@ -21,10 +21,18 @@ export type ObligationKind =
 
 export interface EvidenceFact {
   readonly factId: string;
+  readonly obligationId: string;
   readonly kind: ObligationKind;
   readonly key: string;
   readonly value: string;
   readonly evidenceIds: readonly string[];
+  readonly artifactId: string;
+  readonly startByte: number;
+  readonly endByte: number;
+  readonly sha256: string;
+  readonly byteLength: number;
+  readonly validationDigest: string;
+  readonly origin: "detector-evidence" | "bounded-retrieval";
   readonly observedAt?: string;
   readonly contradicts?: boolean;
 }
@@ -71,4 +79,3 @@ export interface ObligationBuildInput {
 
 export interface GatherPolicyResult
   extends PolicyDecision<EvidenceSufficiencyResult> {}
-

@@ -217,7 +217,7 @@ const tokenMeasurementSchema = z
 
 export const canonicalManifestSchema = z
   .object({
-    formatVersion: z.union([z.literal(1), z.literal(2)]),
+    formatVersion: z.union([z.literal(1), z.literal(2), z.literal(3)]),
     runId: z.string().min(1),
     createdAt: z.string().datetime(),
     artifacts: z.array(artifactManifestSchema),
@@ -232,6 +232,16 @@ export const canonicalManifestSchema = z
       .object({
         digest: sha256Base64UrlSchema,
         producers: z.array(producerMetadataSchema)
+      })
+      .strict()
+      .optional(),
+    evidenceGate: z
+      .object({
+        decision: z.enum(["ready", "gather-more-evidence"]),
+        reports: z.array(z.unknown()),
+        obligations: z.array(z.unknown()),
+        retrievalRequests: z.array(z.unknown()),
+        digest: sha256Base64UrlSchema
       })
       .strict()
       .optional(),
@@ -251,7 +261,7 @@ export const canonicalManifestSchema = z
 export const contextReceiptSchema = z
   .object({
     runId: z.string().min(1),
-    readiness: z.enum(["ready", "failed"]),
+    readiness: z.enum(["ready", "failed", "gather-evidence"]),
     artifactClassifications: z.array(artifactClassificationSchema),
     intent: intentClassificationSchema,
     outcome: z.enum(["green", "red", "unknown"]),

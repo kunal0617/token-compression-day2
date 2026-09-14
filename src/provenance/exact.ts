@@ -1,5 +1,5 @@
 import { realpathSync, readFileSync } from "node:fs";
-import { dirname, relative, resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 
 import type {
@@ -149,11 +149,16 @@ function gitText(cwd: string, args: readonly string[]): string {
 
 function captureGitIdentity(path: string): Result<GitObjectIdentity> {
   try {
-    const repositoryRoot = gitText(dirname(path), [
+    const sourceDirectory = dirname(path);
+    const repositoryRoot = gitText(sourceDirectory, [
       "rev-parse",
       "--show-toplevel"
     ]);
-    const repositoryPath = relative(repositoryRoot, path).replace(/\\/g, "/");
+    const prefix = gitText(sourceDirectory, [
+      "rev-parse",
+      "--show-prefix"
+    ]);
+    const repositoryPath = `${prefix}${basename(path)}`.replace(/\\/g, "/");
     const commit = gitText(repositoryRoot, ["rev-parse", "HEAD"]);
     const tree = gitText(repositoryRoot, ["rev-parse", "HEAD^{tree}"]);
     const entry = gitText(repositoryRoot, [
@@ -169,7 +174,11 @@ function captureGitIdentity(path: string): Result<GitObjectIdentity> {
         repositoryRoot
       });
     }
-    const worktreeBlob = gitText(repositoryRoot, ["hash-object", "--", path]);
+    const worktreeBlob = gitText(repositoryRoot, [
+      "hash-object",
+      "--",
+      repositoryPath
+    ]);
     return success({
       repositoryRoot,
       commit,
@@ -277,10 +286,33 @@ export function renderUniqueSourceLink(
       "Unique provenance occurrence has no approved candidate"
     );
   }
+  if (
+    !candidate.approved ||
+    candidate.identity.sha256 !== sha256Base64Url(candidate.bytes) ||
+    candidate.identity.byteLength !== candidate.bytes.length ||
+    occurrence.candidateIdentity.sha256 !== candidate.identity.sha256 ||
+    occurrence.candidateIdentity.byteLength !== candidate.identity.byteLength ||
+    occurrence.endByte - occurrence.startByte !== result.queryByteLength ||
+    sha256Base64Url(
+      candidate.bytes.subarray(
+        occurrence.startByte,
+        occurrence.endByte
+      )
+    ) !== result.querySha256 ||
+    occurrence.occurrenceId !==
+      deterministicUuid(
+        `${candidate.candidateId}:${result.querySha256}:${occurrence.startByte}:${occurrence.endByte}`
+      )
+  ) {
+    return failure(
+      "INTEGRITY_ERROR",
+      "Source-linked rendering failed exact candidate revalidation"
+    );
+  }
   const git = candidate.identity.git;
   const rendered =
-    git === undefined
-      ? `[SOURCE ${candidate.label} bytes=${occurrence.startByte}-${occurrence.endByte} sha256=${result.querySha256}]`
+    git === undefined || !git.worktreeMatchesBlob
+      ? `[SOURCE WORKTREE ${candidate.label} bytes=${occurrence.startByte}-${occurrence.endByte} sha256=${result.querySha256}]`
       : `[SOURCE ${git.path}@${git.commit} blob=${git.blob} mode=${git.mode} bytes=${occurrence.startByte}-${occurrence.endByte} sha256=${result.querySha256}]`;
   return success({
     occurrenceId: occurrence.occurrenceId,
@@ -289,7 +321,7 @@ export function renderUniqueSourceLink(
     startByte: occurrence.startByte,
     endByte: occurrence.endByte,
     sha256: result.querySha256,
-    ...(git === undefined ? {} : { git }),
+    ...(git === undefined || !git.worktreeMatchesBlob ? {} : { git }),
     rendered
   });
 }
@@ -297,4 +329,3 @@ export function renderUniqueSourceLink(
 export const exactSourceProvenanceProvider =
   new ExactSourceProvenanceProvider();
 export const localApprovedSourceAdapter = new LocalApprovedSourceAdapter();
-

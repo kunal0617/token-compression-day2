@@ -59,7 +59,9 @@ export type ObligationStatus =
 export interface EvidenceObligation {
   readonly obligationId: string;
   readonly kind: string;
+  readonly key: string;
   readonly description: string;
+  readonly required: boolean;
   readonly status: ObligationStatus;
   readonly evidenceIds: readonly string[];
   readonly reasons: readonly string[];
@@ -140,6 +142,8 @@ export interface BuiltinRuntime {
   readonly registryDigest: string;
   readonly preparationProducers: readonly ProducerMetadata[];
   readonly preparationRegistryDigest: string;
+  readonly reviewProducers: readonly ProducerMetadata[];
+  readonly reviewRegistryDigest: string;
   resolveProducer(metadata: ProducerMetadata): boolean;
   classifyArtifact(artifact: ArtifactSnapshot): Result<ArtifactClassification>;
   classifyIntent(prompt: ArtifactSnapshot): Result<IntentClassification>;

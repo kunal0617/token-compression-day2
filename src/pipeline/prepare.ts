@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
 
 import { detectMissingCiFailureEvidence } from "../ci/envelope.js";
+import {
+  buildFailureObligationSpecs,
+  evidenceObligationEvaluator,
+  factsFromFailureReports,
+  gatherMoreEvidencePolicy
+} from "../obligations/evaluate.js";
 import type {
   ArtifactManifest,
   ArtifactSnapshot,
@@ -8,7 +14,7 @@ import type {
   PrepareResult,
   ProtectedRange
 } from "../contracts/types.js";
-import { canonicalJson } from "../core/canonical.js";
+import { canonicalJson, canonicalJsonDigest } from "../core/canonical.js";
 import { sha256Base64Url } from "../core/hash.js";
 import { failure, success, type Result } from "../core/result.js";
 import {
@@ -147,10 +153,54 @@ export async function prepareContext(input: PrepareInput): Promise<PrepareResult
     if (!detected.ok) return detected;
     evidence.push(...detected.value.findings);
   }
+  const failureReports = [];
+  for (const artifact of artifacts.filter(
+    (candidate) => candidate.role === "context"
+  )) {
+    const parsed = builtinRuntime.parseFailures(artifact);
+    if (!parsed.ok) return parsed;
+    failureReports.push(...parsed.value);
+  }
+  const obligationSpecs = buildFailureObligationSpecs({
+    reports: failureReports,
+    evidence
+  });
+  const obligationFacts = factsFromFailureReports(
+    failureReports,
+    obligationSpecs,
+    evidence
+  );
+  const evidenceSufficiency = evidenceObligationEvaluator.evaluate(
+    obligationSpecs,
+    obligationFacts,
+    new Date(),
+    evidence
+  );
+  const evidencePolicy = gatherMoreEvidencePolicy.decide(
+    evidenceSufficiency
+  );
+  if (!evidencePolicy.ok) return evidencePolicy;
+  const evidenceGateUnsigned = {
+    decision: evidenceSufficiency.decision,
+    reports: failureReports,
+    obligations: evidenceSufficiency.obligations,
+    retrievalRequests: evidenceSufficiency.retrievalRequests
+  };
+  const evidenceGate = {
+    ...evidenceGateUnsigned,
+    digest: canonicalJsonDigest(evidenceGateUnsigned)
+  };
 
   const protectedRanges: ProtectedRange[] = [];
   const plans = new Map();
   const warnings: string[] = [];
+  if (evidenceSufficiency.decision === "gather-more-evidence") {
+    warnings.push(
+      ...evidencePolicy.value.reasons.map(
+        (reason) => `Gather More Evidence: ${reason}`
+      )
+    );
+  }
   const nearbySegments = input.nearbySegments ?? 1;
   for (const artifact of artifacts) {
     const artifactEvidence = evidence.filter(
@@ -249,7 +299,7 @@ export async function prepareContext(input: PrepareInput): Promise<PrepareResult
     (artifact) => plans.get(artifact.artifactId) ?? []
   );
   const manifest: CanonicalManifest = {
-    formatVersion: 2,
+    formatVersion: 3,
     runId,
     createdAt,
     artifacts: artifactManifests,
@@ -260,6 +310,7 @@ export async function prepareContext(input: PrepareInput): Promise<PrepareResult
       digest: builtinRuntime.preparationRegistryDigest,
       producers: builtinRuntime.preparationProducers
     },
+    evidenceGate,
     evidence,
     protectedRanges,
     transforms,
@@ -321,6 +372,8 @@ export async function prepareContext(input: PrepareInput): Promise<PrepareResult
       evidence,
       omissions: rendered.omissions,
       warnings
+      ,
+      evidenceDecision: evidenceSufficiency.decision
     });
     const published = store.publishValidated({
       contextPackage,

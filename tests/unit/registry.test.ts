@@ -104,4 +104,21 @@ describe("versioned producer registry", () => {
       }).ok
     ).toBe(false);
   });
+
+  it("freezes the exported runtime, preparation arrays, and metadata", () => {
+    expect(Object.isFrozen(builtinRuntime)).toBe(true);
+    expect(Object.isFrozen(builtinRuntime.preparationProducers)).toBe(true);
+    expect(
+      builtinRuntime.preparationProducers.every((item) =>
+        Object.isFrozen(item)
+      )
+    ).toBe(true);
+    expect(
+      Reflect.set(
+        builtinRuntime as unknown as Record<string, unknown>,
+        "classifyArtifact",
+        () => ({ ok: true })
+      )
+    ).toBe(false);
+  });
 });

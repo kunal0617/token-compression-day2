@@ -48,8 +48,14 @@ function resolveImport(
 ): SourceDocument | undefined {
   if (!specifier.startsWith(".")) return undefined;
   const base = resolve(dirname(fromPath), specifier);
+  const sourceMappedBase = /\.(?:mjs|cjs|js|jsx)$/i.test(base)
+    ? base.replace(/\.(?:mjs|cjs|js|jsx)$/i, "")
+    : base;
   for (const candidate of [
     base,
+    ...[".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"].map(
+      (extension) => `${sourceMappedBase}${extension}`
+    ),
     ...[".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"].map(
       (extension) => `${base}${extension}`
     ),
@@ -82,7 +88,7 @@ export class TypeScriptSemanticEdgeProvider
       noLib: true,
       noResolve: false,
       target: ts.ScriptTarget.ES2022,
-      module: ts.ModuleKind.ESNext,
+      module: ts.ModuleKind.NodeNext,
       moduleResolution: ts.ModuleResolutionKind.NodeNext
     };
     const defaultHost = ts.createCompilerHost(options, true);
@@ -111,6 +117,22 @@ export class TypeScriptSemanticEdgeProvider
       getNewLine: () => "\n",
       writeFile: () => undefined
     };
+    host.resolveModuleNames = (moduleNames, containingFile) =>
+      moduleNames.map((moduleName) => {
+        const target = resolveImport(containingFile, moduleName, documents);
+        if (target === undefined) return undefined;
+        const extension = extname(target.path).toLowerCase();
+        return {
+          resolvedFileName: normalize(resolve(target.path)),
+          extension:
+            extension === ".tsx"
+              ? ts.Extension.Tsx
+              : extension === ".js" || extension === ".jsx"
+                ? ts.Extension.Js
+                : ts.Extension.Ts,
+          isExternalLibraryImport: false
+        };
+      });
     const rootNames = [...documents.keys()];
     const program = ts.createProgram({ rootNames, options, host });
     const checker = program.getTypeChecker();
@@ -122,7 +144,9 @@ export class TypeScriptSemanticEdgeProvider
       const fromText = sourceTexts.get(normalize(sourceFile.fileName)) ?? "";
       for (const statement of sourceFile.statements) {
         if (
-          ts.isImportDeclaration(statement) &&
+          (ts.isImportDeclaration(statement) ||
+            ts.isExportDeclaration(statement)) &&
+          statement.moduleSpecifier !== undefined &&
           ts.isStringLiteral(statement.moduleSpecifier)
         ) {
           const target = resolveImport(
@@ -155,7 +179,12 @@ export class TypeScriptSemanticEdgeProvider
       }
       const visit = (node: ts.Node): void => {
         if (ts.isIdentifier(node)) {
-          const symbol = checker.getSymbolAtLocation(node);
+          const directSymbol = checker.getSymbolAtLocation(node);
+          const symbol =
+            directSymbol !== undefined &&
+            (directSymbol.flags & ts.SymbolFlags.Alias) !== 0
+              ? checker.getAliasedSymbol(directSymbol)
+              : directSymbol;
           const declaration = symbol?.declarations?.[0];
           if (declaration !== undefined) {
             const targetFile = declaration.getSourceFile();
@@ -214,4 +243,3 @@ export class TypeScriptSemanticEdgeProvider
 
 export const typeScriptSemanticEdgeProvider =
   new TypeScriptSemanticEdgeProvider();
-

@@ -10,6 +10,7 @@ import {
 import type {
   ProducerMetadata,
 } from "../contracts/providers.js";
+import type { EvidenceFact } from "../contracts/obligations.js";
 import type {
   ArtifactClassification,
   ArtifactSnapshot,
@@ -258,6 +259,15 @@ export class ContextStore {
         version TEXT NOT NULL,
         digest TEXT NOT NULL,
         PRIMARY KEY(run_id, producer_id),
+        FOREIGN KEY(run_id) REFERENCES runs(run_id) ON DELETE CASCADE
+      ) STRICT;
+
+      CREATE TABLE IF NOT EXISTS review_evidence_facts (
+        run_id TEXT NOT NULL,
+        fact_id TEXT NOT NULL,
+        canonical_json TEXT NOT NULL,
+        digest TEXT NOT NULL,
+        PRIMARY KEY(run_id, fact_id),
         FOREIGN KEY(run_id) REFERENCES runs(run_id) ON DELETE CASCADE
       ) STRICT;
     `);
@@ -846,6 +856,113 @@ export class ContextStore {
     return this.#loadRunProducersByState(runId, "committed");
   }
 
+  loadReviewFacts(runId: string): Result<readonly EvidenceFact[]> {
+    try {
+      const rows = this.#database
+        .prepare(
+          `SELECT f.canonical_json, f.digest
+           FROM review_evidence_facts f
+           JOIN runs r ON r.run_id=f.run_id
+           WHERE f.run_id=? AND r.status='committed'
+             AND r.validation_status='validated'
+           ORDER BY f.fact_id COLLATE BINARY`
+        )
+        .all(runId) as unknown as {
+        canonical_json: string;
+        digest: string;
+      }[];
+      const facts: EvidenceFact[] = [];
+      for (const row of rows) {
+        if (
+          sha256Base64Url(Buffer.from(row.canonical_json, "utf8")) !==
+          row.digest
+        ) {
+          return failure(
+            "INTEGRITY_ERROR",
+            "Persisted review evidence fact digest mismatch",
+            { runId }
+          );
+        }
+        const parsed = JSON.parse(row.canonical_json) as EvidenceFact;
+        if (
+          typeof parsed.factId !== "string" ||
+          typeof parsed.kind !== "string" ||
+          typeof parsed.key !== "string" ||
+          typeof parsed.value !== "string" ||
+          !Array.isArray(parsed.evidenceIds) ||
+          canonicalJson(parsed) !== row.canonical_json
+        ) {
+          return failure(
+            "INTEGRITY_ERROR",
+            "Persisted review evidence fact is invalid",
+            { runId }
+          );
+        }
+        facts.push(parsed);
+      }
+      return success(facts);
+    } catch (error) {
+      return failure("STORAGE_ERROR", "Unable to load review evidence facts", {
+        runId,
+        cause: errorMessage(error)
+      });
+    }
+  }
+
+  saveReviewFacts(
+    runId: string,
+    facts: readonly EvidenceFact[]
+  ): Result<void> {
+    try {
+      this.#database.exec("BEGIN IMMEDIATE");
+      const run = this.#database
+        .prepare(
+          `SELECT run_id FROM runs
+           WHERE run_id=? AND status='committed'
+             AND validation_status='validated'`
+        )
+        .get(runId);
+      if (run === undefined) {
+        throw new Error("Review facts require a committed validated run");
+      }
+      const factIds = new Set<string>();
+      for (const fact of facts) {
+        if (factIds.has(fact.factId)) {
+          throw new Error(`Duplicate review evidence fact ${fact.factId}`);
+        }
+        factIds.add(fact.factId);
+        const json = canonicalJson(fact);
+        this.#database
+          .prepare(
+            `INSERT INTO review_evidence_facts(
+              run_id, fact_id, canonical_json, digest
+            ) VALUES (?, ?, ?, ?)
+            ON CONFLICT(run_id, fact_id) DO UPDATE SET
+              canonical_json=excluded.canonical_json,
+              digest=excluded.digest`
+          )
+          .run(
+            runId,
+            fact.factId,
+            json,
+            sha256Base64Url(Buffer.from(json, "utf8"))
+          );
+      }
+      this.#database.exec("COMMIT");
+      return success(undefined);
+    } catch (error) {
+      try {
+        this.#database.exec("ROLLBACK");
+      } catch {
+        // SQLite reports no active transaction after an automatic rollback.
+      }
+      return failure("STORAGE_ERROR", "Unable to save review evidence facts", {
+        runId,
+        cause: errorMessage(error)
+      });
+    }
+  }
+
   loadRunProducersForValidation(
     runId: string
   ): Result<readonly ProducerMetadata[]> {
@@ -1127,7 +1244,9 @@ export class ContextStore {
       tokens: input.contextPackage.manifest.tokenizer,
       evidence: input.contextPackage.manifest.evidence,
       omissions: input.contextPackage.manifest.omissions,
-      warnings: input.receipt.warnings
+      warnings: input.receipt.warnings,
+      evidenceDecision:
+        input.contextPackage.manifest.evidenceGate?.decision ?? "ready"
     });
     if (canonicalJson(expectedReceipt) !== canonicalJson(input.receipt)) {
       const message = "Receipt does not match the validated package";

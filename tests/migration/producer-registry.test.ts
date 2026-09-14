@@ -36,6 +36,7 @@ describe("producer registry migration", () => {
       if (!prepared.ok) return;
       const {
         producerRegistry: _producerRegistry,
+        evidenceGate: _evidenceGate,
         ...manifestWithoutRegistry
       } = prepared.value.package.manifest;
       const legacyManifest: CanonicalManifest = {

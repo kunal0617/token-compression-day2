@@ -55,6 +55,16 @@ describe("CQ-01 exact source provenance", () => {
     expect(renderUniqueSourceLink(unique.value, [
       candidate("one", "prefix\nconst answer = 42;\nsuffix")
     ]).ok).toBe(true);
+    expect(
+      renderUniqueSourceLink(unique.value, [
+        candidate("one", "prefix\nconst answer = 43;\nsuffix")
+      ]).ok
+    ).toBe(false);
+    expect(
+      renderUniqueSourceLink(unique.value, [
+        candidate("one", "prefix\nconst answer = 42;\nsuffix", false)
+      ]).ok
+    ).toBe(false);
 
     const ambiguous = exactSourceProvenanceProvider.provide({
       query,
@@ -112,5 +122,39 @@ describe("CQ-01 exact source provenance", () => {
     expect(git?.path).toBe("LICENSE");
     expect(git?.worktreeMatchesBlob).toBe(true);
   });
-});
 
+  it("never renders dirty worktree-only bytes as a commit/blob link", () => {
+    const source = candidate(
+      "dirty-source",
+      "export const clean = true;\nexport const dirtyOnly = 42;\n"
+    );
+    const dirtySource: ApprovedSourceCandidate = {
+      ...source,
+      canonicalPath: "C:\\repo\\source.ts",
+      identity: {
+        ...source.identity,
+        git: {
+          repositoryRoot: "C:\\repo",
+          commit: "1".repeat(40),
+          tree: "2".repeat(40),
+          blob: "3".repeat(40),
+          path: "source.ts",
+          mode: "100644",
+          worktreeMatchesBlob: false
+        }
+      }
+    };
+    const match = exactSourceProvenanceProvider.provide({
+      query: Buffer.from("dirtyOnly", "utf8"),
+      candidates: [dirtySource]
+    });
+    expect(match.ok).toBe(true);
+    if (!match.ok) return;
+    const link = renderUniqueSourceLink(match.value, [dirtySource]);
+    expect(link.ok).toBe(true);
+    if (!link.ok) return;
+    expect(link.value.git).toBeUndefined();
+    expect(link.value.rendered).toContain("SOURCE WORKTREE");
+    expect(link.value.rendered).not.toContain("@");
+  });
+});

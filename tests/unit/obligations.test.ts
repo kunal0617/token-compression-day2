@@ -6,11 +6,13 @@ import type {
   EvidenceRetrievalAdapter
 } from "../../src/contracts/obligations.js";
 import { canonicalJsonDigest } from "../../src/core/canonical.js";
+import { sha256Base64Url } from "../../src/core/hash.js";
 import { success } from "../../src/core/result.js";
 import { snapshotBytes } from "../../src/intake/intake.js";
 import {
   assessFailureEvidence,
   buildFailureObligationSpecs,
+  createEvidenceFact,
   evidenceObligationEvaluator,
   executeBoundedRetrieval,
   factsFromFailureReports,
@@ -33,6 +35,28 @@ function spec(
   };
 }
 
+function fact(
+  obligationId: string,
+  key: string,
+  value: string,
+  observedAt?: string
+): EvidenceFact {
+  return createEvidenceFact({
+    obligationId,
+    kind: "configuration",
+    key,
+    value,
+    evidenceIds: [`evidence-${obligationId}`],
+    artifactId: "artifact",
+    startByte: 0,
+    endByte: Buffer.byteLength(value, "utf8"),
+    sha256: canonicalJsonDigest(value),
+    byteLength: Buffer.byteLength(value, "utf8"),
+    origin: "bounded-retrieval",
+    ...(observedAt === undefined ? {} : { observedAt })
+  });
+}
+
 describe("CQ-03/CQ-06 evidence obligations", () => {
   it("reports satisfied, missing, ambiguous, contradicted, and stale explicitly", () => {
     const specs: EvidenceObligationSpec[] = [
@@ -43,42 +67,11 @@ describe("CQ-03/CQ-06 evidence obligations", () => {
       spec("stale", "e", { freshnessMs: 1_000 })
     ];
     const facts: EvidenceFact[] = [
-      {
-        factId: "a1",
-        kind: "configuration",
-        key: "a",
-        value: "one",
-        evidenceIds: ["e1"]
-      },
-      {
-        factId: "c1",
-        kind: "configuration",
-        key: "c",
-        value: "one",
-        evidenceIds: []
-      },
-      {
-        factId: "c2",
-        kind: "configuration",
-        key: "c",
-        value: "two",
-        evidenceIds: []
-      },
-      {
-        factId: "d1",
-        kind: "configuration",
-        key: "d",
-        value: "actual",
-        evidenceIds: []
-      },
-      {
-        factId: "e1",
-        kind: "configuration",
-        key: "e",
-        value: "old",
-        evidenceIds: [],
-        observedAt: "2020-01-01T00:00:00.000Z"
-      }
+      fact("satisfied", "a", "one"),
+      fact("ambiguous", "c", "one"),
+      fact("ambiguous", "c", "two"),
+      fact("contradicted", "d", "actual"),
+      fact("stale", "e", "old", "2020-01-01T00:00:00.000Z")
     ];
     const result = evidenceObligationEvaluator.evaluate(
       specs,
@@ -124,6 +117,14 @@ describe("CQ-03/CQ-06 evidence obligations", () => {
     expect(decision.value.action).toBe("gather");
     expect(decision.value.priority).toBe(1000);
     expect(evaluated.retrievalRequests).toHaveLength(1);
+
+    const optional = evidenceObligationEvaluator.evaluate(
+      [spec("optional", "optional", { required: false })],
+      []
+    );
+    expect(optional.decision).toBe("ready");
+    expect(optional.obligations[0]?.status).toBe("missing");
+    expect(optional.retrievalRequests).toEqual([]);
   });
 
   it("builds external CQ03/CQ06 gaps from typed failures", () => {
@@ -146,7 +147,8 @@ describe("CQ-03/CQ-06 evidence obligations", () => {
       reports: reports.value,
       evidence: []
     });
-    const facts = factsFromFailureReports(reports.value);
+    const evidence: [] = [];
+    const facts = factsFromFailureReports(reports.value, specs, evidence);
     const evaluated = evidenceObligationEvaluator.evaluate(specs, facts);
 
     expect(
@@ -177,13 +179,19 @@ describe("CQ-03/CQ-06 evidence obligations", () => {
       },
       retrieve: async (request) =>
         success([
-          {
-            factId: request.obligationId,
+          createEvidenceFact({
+            obligationId: request.obligationId,
             kind: "referenced-source",
             key: "source",
             value: "exact",
-            evidenceIds: []
-          }
+            evidenceIds: ["retrieved"],
+            artifactId: request.artifactId ?? "artifact",
+            startByte: request.startByte ?? 0,
+            endByte: (request.startByte ?? 0) + 5,
+            sha256: sha256Base64Url(Buffer.from("exact", "utf8")),
+            byteLength: 5,
+            origin: "bounded-retrieval"
+          })
         ])
     };
     const valid = await executeBoundedRetrieval(
@@ -211,5 +219,34 @@ describe("CQ-03/CQ-06 evidence obligations", () => {
       new Map([["source-read", adapter]])
     );
     expect(oversized.ok).toBe(false);
+  });
+
+  it("lets validated final-summary evidence satisfy its required obligation", () => {
+    const summaryBytes = Buffer.from("Tests: 1 failed", "utf8");
+    const evidence = [
+      {
+        evidenceId: "summary-evidence",
+        occurrenceId: "summary-occurrence",
+        artifactId: "artifact",
+        kind: "final-summary" as const,
+        startByte: 0,
+        endByte: summaryBytes.length,
+        sha256: sha256Base64Url(summaryBytes),
+        textPreview: summaryBytes.toString("utf8"),
+        reasons: ["summary"],
+        mandatoryInline: true,
+        protectionReasons: ["summary"]
+      }
+    ];
+    const specs = buildFailureObligationSpecs({ reports: [], evidence });
+    const facts = factsFromFailureReports([], specs, evidence);
+    const evaluated = evidenceObligationEvaluator.evaluate(
+      specs,
+      facts,
+      new Date(),
+      evidence
+    );
+    expect(evaluated.decision).toBe("ready");
+    expect(evaluated.obligations[0]?.status).toBe("satisfied");
   });
 });

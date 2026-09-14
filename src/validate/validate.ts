@@ -13,6 +13,11 @@ import { assertRange, rangesIntersect } from "../core/ranges.js";
 import { failure, success, type Result } from "../core/result.js";
 import { buildProtectedRanges } from "../protect/protect.js";
 import { builtinRuntime } from "../registry/builtins.js";
+import {
+  buildFailureObligationSpecs,
+  evidenceObligationEvaluator,
+  factsFromFailureReports
+} from "../obligations/evaluate.js";
 import { buildReceipt } from "../receipt/receipt.js";
 import { renderContext } from "../render/render.js";
 import { splitRawLines } from "../segment/segment.js";
@@ -120,7 +125,7 @@ export function validateContextPackage(input: {
       ? store.loadRunProducersForValidation(contextPackage.runId)
       : store.loadRunProducers(contextPackage.runId);
   if (!storedProducers.ok) return storedProducers;
-  if (manifest.formatVersion === 2) {
+  if (manifest.formatVersion >= 2) {
     if (
       manifest.producerRegistry === undefined ||
       manifest.producerRegistry.digest !==
@@ -143,6 +148,15 @@ export function validateContextPackage(input: {
     return failure(
       "INTEGRITY_ERROR",
       "Legacy manifest contains unexpected producer metadata"
+    );
+  }
+  if (
+    (manifest.formatVersion === 3 && manifest.evidenceGate === undefined) ||
+    (manifest.formatVersion < 3 && manifest.evidenceGate !== undefined)
+  ) {
+    return failure(
+      "INTEGRITY_ERROR",
+      "Manifest evidence gate does not match its format version"
     );
   }
 
@@ -328,6 +342,39 @@ export function validateContextPackage(input: {
     if (!decision.ok) return decision;
     recomputedTransforms.push(...(decision.value.value ?? []));
   }
+  const recomputedReports = [];
+  for (const artifact of artifacts.filter(
+    (candidate) => candidate.role === "context"
+  )) {
+    const parsed = builtinRuntime.parseFailures(artifact);
+    if (!parsed.ok) return parsed;
+    recomputedReports.push(...parsed.value);
+  }
+  const recomputedSpecs = buildFailureObligationSpecs({
+    reports: recomputedReports,
+    evidence: recomputedEvidence
+  });
+  const recomputedFacts = factsFromFailureReports(
+    recomputedReports,
+    recomputedSpecs,
+    recomputedEvidence
+  );
+  const recomputedSufficiency = evidenceObligationEvaluator.evaluate(
+    recomputedSpecs,
+    recomputedFacts,
+    new Date(),
+    recomputedEvidence
+  );
+  const recomputedGateUnsigned = {
+    decision: recomputedSufficiency.decision,
+    reports: recomputedReports,
+    obligations: recomputedSufficiency.obligations,
+    retrievalRequests: recomputedSufficiency.retrievalRequests
+  };
+  const recomputedGate = {
+    ...recomputedGateUnsigned,
+    digest: canonicalJsonDigest(recomputedGateUnsigned)
+  };
   const manifestArtifactSemantics = manifest.artifacts.map((artifact) => ({
     artifactId: artifact.artifactId,
     classification: artifact.classification,
@@ -355,6 +402,9 @@ export function validateContextPackage(input: {
     canonicalJson(manifest.protectedRanges) !==
       canonicalJson(recomputedProtected) ||
     canonicalJson(manifest.transforms) !== canonicalJson(recomputedTransforms)
+    ||
+    (manifest.formatVersion === 3 &&
+      canonicalJson(manifest.evidenceGate) !== canonicalJson(recomputedGate))
   ) {
     return failure(
       "INTEGRITY_ERROR",
@@ -874,7 +924,9 @@ export function verifyStoredRun(
     tokens: storedManifest.value.manifest.tokenizer,
     evidence: storedManifest.value.manifest.evidence,
     omissions: storedManifest.value.manifest.omissions,
-    warnings: receipt.value.warnings
+    warnings: receipt.value.warnings,
+    evidenceDecision:
+      storedManifest.value.manifest.evidenceGate?.decision ?? "ready"
   });
   if (canonicalJson(expectedReceipt) !== canonicalJson(receipt.value)) {
     return failure(

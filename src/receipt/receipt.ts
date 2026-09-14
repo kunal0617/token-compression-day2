@@ -29,6 +29,7 @@ export function buildReceipt(input: {
   readonly evidence: readonly EvidenceSpan[];
   readonly omissions: readonly OmissionRecord[];
   readonly warnings: readonly string[];
+  readonly evidenceDecision?: "ready" | "gather-more-evidence";
 }): ContextReceipt {
   const transformations = Object.fromEntries(
     transformReasons.map((reason) => [
@@ -45,7 +46,10 @@ export function buildReceipt(input: {
 
   return {
     runId: input.runId,
-    readiness: "ready",
+    readiness:
+      input.evidenceDecision === "gather-more-evidence"
+        ? "gather-evidence"
+        : "ready",
     artifactClassifications: input.classifications,
     intent: input.intent,
     outcome: input.outcome,

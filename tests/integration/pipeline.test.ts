@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import { prepareContext } from "../../src/pipeline/prepare.js";
 import { ContextStore } from "../../src/storage/store.js";
 import { verifyStoredRun } from "../../src/validate/validate.js";
+import { OfflineHandoffPort } from "../../src/ports/handoff.js";
 
 describe("end-to-end offline pipeline", () => {
   it("reduces repetition while preserving protected root-cause facts", async () => {
@@ -168,6 +169,58 @@ describe("end-to-end offline pipeline", () => {
       );
       expect(occurrences.length).toBeGreaterThanOrEqual(2);
       expect(new Set(occurrences).size).toBe(occurrences.length);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("persists unresolved evidence gates and blocks ready handoff", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "ctxo-evidence-gate-"));
+    const storePath = join(directory, "context.sqlite");
+    try {
+      const result = await prepareContext({
+        promptText: "Fix the failure.",
+        contextTexts: [
+          {
+            label: "missing-source.log",
+            text: [
+              "TypeError: broken",
+              "  at run (src/missing.ts:4:2)",
+              "Process exited with code 1",
+              ""
+            ].join("\n")
+          }
+        ],
+        storePath
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.receipt.readiness).toBe("gather-evidence");
+      expect(result.value.package.manifest.formatVersion).toBe(3);
+      expect(result.value.package.manifest.evidenceGate?.decision).toBe(
+        "gather-more-evidence"
+      );
+      expect(
+        result.value.package.manifest.evidenceGate?.obligations.some(
+          (obligation) =>
+            obligation.required &&
+            obligation.status === "missing"
+        )
+      ).toBe(true);
+      expect(
+        (
+          await new OfflineHandoffPort().handoff(
+            result.value.package
+          )
+        ).ok
+      ).toBe(false);
+
+      const store = new ContextStore(storePath);
+      try {
+        expect(verifyStoredRun(store, result.value.package.runId).ok).toBe(true);
+      } finally {
+        store.close();
+      }
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }

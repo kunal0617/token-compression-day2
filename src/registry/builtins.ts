@@ -52,7 +52,6 @@ import {
 } from "../source/tree-sitter.js";
 import { typeScriptSemanticEdgeProvider } from "../source/typescript-semantic.js";
 import { reviewSubjectProvider } from "../approval/review.js";
-import { optionalCopilotSdkAdapter } from "../adapters/copilot-sdk.js";
 import { deterministicModelFitAdviser } from "../model/advice.js";
 import { isolatedGapSuggestionProducer } from "../helper/isolation.js";
 import { securityAssessmentProducer } from "../security/security.js";
@@ -269,7 +268,6 @@ export function createBuiltinRuntime(): BuiltinRuntime {
     | typeof conservativeFileStructureProvider
     | typeof typeScriptSemanticEdgeProvider
     | typeof reviewSubjectProvider
-    | typeof optionalCopilotSdkAdapter
     | typeof deterministicModelFitAdviser
     | typeof isolatedGapSuggestionProducer
     | typeof securityAssessmentProducer
@@ -308,8 +306,6 @@ export function createBuiltinRuntime(): BuiltinRuntime {
     ,
     reviewSubjectProvider
     ,
-    optionalCopilotSdkAdapter
-    ,
     deterministicModelFitAdviser
     ,
     isolatedGapSuggestionProducer
@@ -321,19 +317,46 @@ export function createBuiltinRuntime(): BuiltinRuntime {
     const registered = registry.register(producer);
     if (!registered.ok) throw new Error(registered.error.message);
   }
+  const preparationMetadata = preparation
+    .map((producer) => {
+      const registered = registry.get(
+        producer.metadata.producerId,
+        producer.metadata.version,
+        producer.metadata.digest
+      );
+      if (registered === undefined) {
+        throw new Error(
+          `Preparation producer was not registered: ${producer.metadata.producerId}`
+        );
+      }
+      return registered.metadata;
+    })
+    .sort(compareProducerMetadata);
+  const reviewProducerIds = new Set([
+    vitestJestFailureDetector.metadata.producerId,
+    nodeV8FailureDetector.metadata.producerId,
+    conservativeFailureFallbackDetector.metadata.producerId,
+    evidenceObligationEvaluator.metadata.producerId,
+    gatherMoreEvidencePolicy.metadata.producerId,
+    exactSourceProvenanceProvider.metadata.producerId,
+    treeSitterJsTsStructureProvider.metadata.producerId,
+    conservativeFileStructureProvider.metadata.producerId,
+    typeScriptSemanticEdgeProvider.metadata.producerId,
+    reviewSubjectProvider.metadata.producerId,
+    deterministicModelFitAdviser.metadata.producerId,
+    isolatedGapSuggestionProducer.metadata.producerId,
+    securityAssessmentProducer.metadata.producerId
+  ]);
+  const reviewMetadata = registry
+    .metadata()
+    .filter((item) => reviewProducerIds.has(item.producerId));
   return {
     producers: registry.metadata(),
     registryDigest: registry.digest(),
-    preparationProducers: Object.freeze(
-      preparation
-        .map((producer) => producer.metadata)
-        .sort(compareProducerMetadata)
-    ),
-    preparationRegistryDigest: canonicalJsonDigest(
-      preparation
-        .map((producer) => producer.metadata)
-        .sort(compareProducerMetadata)
-    ),
+    preparationProducers: Object.freeze(preparationMetadata),
+    preparationRegistryDigest: canonicalJsonDigest(preparationMetadata),
+    reviewProducers: Object.freeze(reviewMetadata),
+    reviewRegistryDigest: canonicalJsonDigest(reviewMetadata),
     resolveProducer: (producerMetadata) =>
       producerSnapshotMatchesRegistry([producerMetadata], registry),
     classifyArtifact: (artifact) =>
@@ -348,4 +371,4 @@ export function createBuiltinRuntime(): BuiltinRuntime {
   };
 }
 
-export const builtinRuntime = createBuiltinRuntime();
+export const builtinRuntime = Object.freeze(createBuiltinRuntime());

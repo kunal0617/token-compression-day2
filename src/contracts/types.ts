@@ -1,5 +1,10 @@
 import type { Result } from "../core/result.js";
 import type { ProducerMetadata } from "./providers.js";
+import type { FailureReport } from "./failures.js";
+import type {
+  EvidenceRetrievalRequest,
+  EvidenceSufficiencyResult
+} from "./obligations.js";
 
 export interface ByteRange {
   startByte: number;
@@ -208,7 +213,7 @@ export interface ArtifactManifest {
 }
 
 export interface CanonicalManifest {
-  readonly formatVersion: 1 | 2;
+  readonly formatVersion: 1 | 2 | 3;
   readonly runId: string;
   readonly createdAt: string;
   readonly artifacts: readonly ArtifactManifest[];
@@ -220,6 +225,13 @@ export interface CanonicalManifest {
   readonly producerRegistry?: {
     readonly digest: string;
     readonly producers: readonly ProducerMetadata[];
+  };
+  readonly evidenceGate?: {
+    readonly decision: EvidenceSufficiencyResult["decision"];
+    readonly reports: readonly FailureReport[];
+    readonly obligations: EvidenceSufficiencyResult["obligations"];
+    readonly retrievalRequests: readonly EvidenceRetrievalRequest[];
+    readonly digest: string;
   };
   readonly evidence: readonly EvidenceSpan[];
   readonly protectedRanges: readonly ProtectedRange[];
@@ -259,7 +271,7 @@ export interface ValidatedContextPackage extends ContextPackage {
 
 export interface ContextReceipt {
   readonly runId: string;
-  readonly readiness: "ready" | "failed";
+  readonly readiness: "ready" | "failed" | "gather-evidence";
   readonly artifactClassifications: readonly ArtifactClassification[];
   readonly intent: IntentClassification;
   readonly outcome: RunOutcome;

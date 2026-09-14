@@ -15,6 +15,7 @@ import type {
 } from "../contracts/providers.js";
 import { canonicalJsonDigest } from "../core/canonical.js";
 import { deterministicUuid } from "../core/hash.js";
+import { sha256Base64Url } from "../core/hash.js";
 import { failure, success, type Result } from "../core/result.js";
 import type { ArtifactSnapshot, EvidenceSpan } from "../contracts/types.js";
 import { typedFailureParsers } from "../parsers/failures.js";
@@ -188,73 +189,230 @@ export function buildFailureObligationSpecs(
 }
 
 export function factsFromFailureReports(
-  reports: readonly FailureReport[]
+  reports: readonly FailureReport[],
+  specs: readonly EvidenceObligationSpec[],
+  evidence: readonly EvidenceSpan[]
 ): readonly EvidenceFact[] {
   const facts: EvidenceFact[] = [];
+  const addFact = (input: {
+    kind: ObligationKind;
+    key: string;
+    value: string;
+    artifactId: string;
+    startByte: number;
+    endByte: number;
+    allowedEvidenceKinds: readonly EvidenceSpan["kind"][];
+  }): void => {
+    const obligation = specs.find(
+      (item) => item.kind === input.kind && item.key === input.key
+    );
+    if (obligation === undefined) return;
+    const matchingEvidence = evidence.filter(
+      (item) =>
+        item.artifactId === input.artifactId &&
+        item.startByte < input.endByte &&
+        input.startByte < item.endByte &&
+        input.allowedEvidenceKinds.includes(item.kind)
+    );
+    if (matchingEvidence.length === 0) return;
+    const source = matchingEvidence[0] as EvidenceSpan;
+    facts.push(
+      createEvidenceFact({
+        obligationId: obligation.obligationId,
+        kind: input.kind,
+        key: input.key,
+        value: input.value,
+        evidenceIds: matchingEvidence.map((item) => item.evidenceId),
+        artifactId: source.artifactId,
+        startByte: source.startByte,
+        endByte: source.endByte,
+        sha256: source.sha256,
+        byteLength: source.endByte - source.startByte
+        ,
+        origin: "detector-evidence"
+      })
+    );
+  };
   for (const report of reports) {
     for (const test of report.tests) {
       const base = `${report.artifactId}:${test.testName}`;
-      facts.push({
-        factId: deterministicUuid(`${base}:failure`),
+      addFact({
         kind: "failure-block",
         key: base,
         value: test.testName,
-        evidenceIds: []
+        artifactId: report.artifactId,
+        startByte: test.startByte,
+        endByte: test.endByte,
+        allowedEvidenceKinds: [
+          "failing-test",
+          "assertion-block",
+          "expected-value",
+          "actual-value"
+        ]
       });
       if (test.expected !== undefined) {
-        facts.push({
-          factId: deterministicUuid(`${base}:expected:${test.expected}`),
+        addFact({
           kind: "expected-value",
           key: `${base}:expected`,
           value: test.expected,
-          evidenceIds: []
+          artifactId: report.artifactId,
+          startByte: test.startByte,
+          endByte: test.endByte,
+          allowedEvidenceKinds: ["expected-value", "assertion-block"]
         });
       }
       if (test.actual !== undefined) {
-        facts.push({
-          factId: deterministicUuid(`${base}:actual:${test.actual}`),
+        addFact({
           kind: "actual-value",
           key: `${base}:actual`,
           value: test.actual,
-          evidenceIds: []
+          artifactId: report.artifactId,
+          startByte: test.startByte,
+          endByte: test.endByte,
+          allowedEvidenceKinds: ["actual-value", "assertion-block"]
         });
       }
     }
     for (const exception of flattenExceptions(report.exceptions)) {
-      facts.push({
-        factId: deterministicUuid(
-          `${report.artifactId}:${exception.type}:${exception.startByte}`
-        ),
+      addFact({
         kind: "failure-block",
         key: `${report.artifactId}:${exception.type}:${exception.startByte}`,
         value: `${exception.type}: ${exception.message}`,
-        evidenceIds: []
+        artifactId: report.artifactId,
+        startByte: exception.startByte,
+        endByte: exception.endByte,
+        allowedEvidenceKinds: [
+          "exception",
+          "exception-chain",
+          "stack-frame"
+        ]
       });
     }
     if (report.commands.length > 0 || report.exitCode !== undefined) {
-      facts.push({
-        factId: deterministicUuid(`${report.artifactId}:command-exit`),
+      const commandEvidence = evidence.filter(
+        (item) =>
+        item.artifactId === report.artifactId &&
+        ["command", "exit-code"].includes(item.kind)
+      );
+      if (commandEvidence.length > 0) {
+        const first = commandEvidence[0] as EvidenceSpan;
+        const obligation = specs.find(
+        (item) =>
+          item.kind === "command-exit" &&
+          item.key === `${report.artifactId}:command-exit`
+        );
+        if (obligation !== undefined) facts.push(createEvidenceFact({
+        obligationId: obligation.obligationId,
         kind: "command-exit",
         key: `${report.artifactId}:command-exit`,
         value: `${report.commands.at(-1)?.command ?? "unknown"}:${
           report.exitCode ?? "unknown"
         }`,
-        evidenceIds: []
-      });
+        evidenceIds: commandEvidence.map((item) => item.evidenceId),
+        artifactId: report.artifactId,
+        startByte: first.startByte,
+        endByte: first.endByte,
+        sha256: first.sha256,
+        byteLength: first.endByte - first.startByte
+        ,
+        origin: "detector-evidence"
+        }));
+      }
     }
     if (report.environment.length > 0) {
-      facts.push({
-        factId: deterministicUuid(`${report.artifactId}:runtime`),
+      const runtimeEvidence = evidence.filter(
+        (item) =>
+        item.artifactId === report.artifactId &&
+        item.kind === "version"
+      );
+      const obligation = specs.find(
+        (item) =>
+        item.kind === "runtime" &&
+        item.key === `${report.artifactId}:runtime`
+      );
+      if (runtimeEvidence.length > 0 && obligation !== undefined) {
+        const first = runtimeEvidence[0] as EvidenceSpan;
+        facts.push(createEvidenceFact({
+        obligationId: obligation.obligationId,
         kind: "runtime",
         key: `${report.artifactId}:runtime`,
         value: report.environment
-          .map((fact) => `${fact.key}=${fact.value}`)
-          .join(";"),
-        evidenceIds: []
-      });
+        .map((fact) => `${fact.key}=${fact.value}`)
+        .join(";"),
+        evidenceIds: runtimeEvidence.map((item) => item.evidenceId),
+        artifactId: report.artifactId,
+        startByte: first.startByte,
+        endByte: first.endByte,
+        sha256: first.sha256,
+        byteLength: first.endByte - first.startByte
+        ,
+        origin: "detector-evidence"
+        }));
+      }
     }
   }
+  const summarySpec = specs.find(
+    (item) => item.kind === "final-summary"
+  );
+  const summaries = evidence.filter(
+    (item) => item.kind === "final-summary"
+  );
+  if (summarySpec !== undefined && summaries.length > 0) {
+    const first = summaries[0] as EvidenceSpan;
+    facts.push(createEvidenceFact({
+      obligationId: summarySpec.obligationId,
+      kind: "final-summary",
+      key: summarySpec.key,
+      value: summaries.map((item) => item.textPreview).join("\n"),
+      evidenceIds: summaries.map((item) => item.evidenceId),
+      artifactId: first.artifactId,
+      startByte: first.startByte,
+      endByte: first.endByte,
+      sha256: first.sha256,
+      byteLength: first.endByte - first.startByte
+      ,
+      origin: "detector-evidence"
+    }));
+  }
   return facts;
+}
+
+export function createEvidenceFact(input: Omit<EvidenceFact, "factId" | "validationDigest">): EvidenceFact {
+  const factId = deterministicUuid(
+    `${input.obligationId}:${input.kind}:${input.key}:${input.artifactId}:${input.startByte}:${input.endByte}:${input.sha256}:${input.value}`
+  );
+  const unsigned = { factId, ...input };
+  return { ...unsigned, validationDigest: canonicalJsonDigest(unsigned) };
+}
+
+function validFact(
+  fact: EvidenceFact,
+  spec: EvidenceObligationSpec,
+  evidence: readonly EvidenceSpan[]
+): boolean {
+  const { validationDigest, ...unsigned } = fact;
+  return (
+    validationDigest === canonicalJsonDigest(unsigned) &&
+    fact.obligationId === spec.obligationId &&
+    fact.kind === spec.kind &&
+    fact.key === spec.key &&
+    fact.evidenceIds.length > 0 &&
+    fact.byteLength === fact.endByte - fact.startByte &&
+    fact.byteLength >= 0 &&
+    /^[A-Za-z0-9_-]{43}$/.test(fact.sha256) &&
+    (fact.origin === "bounded-retrieval" ||
+      (fact.evidenceIds.every((evidenceId) =>
+        evidence.some((span) => span.evidenceId === evidenceId)
+      ) &&
+        evidence.some(
+          (span) =>
+            fact.evidenceIds.includes(span.evidenceId) &&
+            span.artifactId === fact.artifactId &&
+            span.startByte === fact.startByte &&
+            span.endByte === fact.endByte &&
+            span.sha256 === fact.sha256
+        )))
+  );
 }
 
 export class EvidenceObligationEvaluator {
@@ -268,11 +426,12 @@ export class EvidenceObligationEvaluator {
   evaluate(
     specs: readonly EvidenceObligationSpec[],
     facts: readonly EvidenceFact[],
-    now = new Date()
+    now = new Date(),
+    evidence: readonly EvidenceSpan[] = []
   ): EvidenceSufficiencyResult {
     const obligations: EvidenceObligation[] = specs.map((item) => {
       const matches = facts.filter(
-        (fact) => fact.kind === item.kind && fact.key === item.key
+        (fact) => validFact(fact, item, evidence)
       );
       const values = [...new Set(matches.map((fact) => fact.value))];
       const freshnessMs = item.freshnessMs;
@@ -309,7 +468,9 @@ export class EvidenceObligationEvaluator {
       return {
         obligationId: item.obligationId,
         kind: item.kind,
+        key: item.key,
         description: item.description,
+        required: item.required,
         status,
         evidenceIds: matches.flatMap((fact) => fact.evidenceIds),
         reasons,
@@ -317,7 +478,8 @@ export class EvidenceObligationEvaluator {
       };
     });
     const unresolved = obligations.filter(
-      (obligation) => obligation.status !== "satisfied"
+      (obligation) =>
+        obligation.required && obligation.status !== "satisfied"
     );
     const unresolvedIds = new Set(
       unresolved.map((obligation) => obligation.obligationId)
@@ -325,7 +487,9 @@ export class EvidenceObligationEvaluator {
     const retrievalRequests = specs
       .filter(
         (item) =>
-          unresolvedIds.has(item.obligationId) && item.retrieval !== undefined
+          item.required &&
+          unresolvedIds.has(item.obligationId) &&
+          item.retrieval !== undefined
       )
       .slice(0, MAX_RETRIEVAL_REQUESTS)
       .map((item) => ({
@@ -366,7 +530,8 @@ export class GatherMoreEvidencePolicy
     producer: ProducerMetadata;
   }> {
     const unresolved = input.obligations.filter(
-      (obligation) => obligation.status !== "satisfied"
+      (obligation) =>
+        obligation.required && obligation.status !== "satisfied"
     );
     return success({
       action: unresolved.length === 0 ? "accept" : "gather",
@@ -415,6 +580,45 @@ export async function executeBoundedRetrieval(
     }
     const retrieved = await adapter.retrieve(request);
     if (!retrieved.ok) return retrieved;
+    let totalBytes = 0;
+    for (const fact of retrieved.value) {
+      totalBytes += fact.byteLength;
+      if (
+        fact.obligationId !== request.obligationId ||
+        fact.byteLength !== Buffer.byteLength(fact.value, "utf8") ||
+        fact.sha256 !== sha256Base64Url(Buffer.from(fact.value, "utf8")) ||
+        (request.artifactId !== undefined &&
+          fact.artifactId !== request.artifactId) ||
+        (request.startByte !== undefined &&
+          fact.startByte < request.startByte) ||
+        (request.endByte !== undefined && fact.endByte > request.endByte) ||
+        fact.origin !== "bounded-retrieval" ||
+        !validFact(
+          fact,
+          {
+            obligationId: request.obligationId,
+            kind: fact.kind,
+            description: request.purpose,
+            key: fact.key,
+            required: true
+          },
+          []
+        )
+      ) {
+        return failure(
+          "INTEGRITY_ERROR",
+          "Evidence retrieval adapter returned an invalid fact",
+          { obligationId: request.obligationId }
+        );
+      }
+    }
+    if (totalBytes > request.maxBytes) {
+      return failure(
+        "LIMIT_EXCEEDED",
+        "Evidence retrieval exceeded aggregate maxBytes",
+        { obligationId: request.obligationId, totalBytes }
+      );
+    }
     facts.push(...retrieved.value);
   }
   return success(facts);
@@ -440,10 +644,15 @@ export function assessFailureEvidence(input: {
     evidence: input.evidence
   });
   const facts = [
-    ...factsFromFailureReports(reports.value),
+    ...factsFromFailureReports(reports.value, specs, input.evidence),
     ...(input.additionalFacts ?? [])
   ];
-  const sufficiency = evidenceObligationEvaluator.evaluate(specs, facts);
+  const sufficiency = evidenceObligationEvaluator.evaluate(
+    specs,
+    facts,
+    new Date(),
+    input.evidence
+  );
   const decision = gatherMoreEvidencePolicy.decide(sufficiency);
   if (!decision.ok) return decision;
   return success({

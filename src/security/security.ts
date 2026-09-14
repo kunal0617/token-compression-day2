@@ -57,11 +57,10 @@ const secretPatterns: readonly {
   }
 ];
 
-function byteRange(text: string, index: number, value: string) {
-  const startByte = Buffer.byteLength(text.slice(0, index), "utf8");
+function byteRange(index: number, value: string) {
   return {
-    startByte,
-    endByte: startByte + Buffer.byteLength(value, "utf8")
+    startByte: index,
+    endByte: index + value.length
   };
 }
 
@@ -74,12 +73,12 @@ export function assessSecurity(
 ): SecurityAssessment {
   const findings: SecurityFinding[] = [];
   for (const source of sources) {
-    const text = source.bytes.toString("utf8");
+    const byteText = source.bytes.toString("latin1");
     for (const item of secretPatterns) {
       const pattern = new RegExp(item.pattern.source, item.pattern.flags);
-      for (const match of text.matchAll(pattern)) {
+      for (const match of byteText.matchAll(pattern)) {
         if (match.index === undefined) continue;
-        const range = byteRange(text, match.index, match[0]);
+        const range = byteRange(match.index, match[0]);
         findings.push({
           findingId: deterministicUuid(
             `${source.sourceId}:${item.kind}:${range.startByte}:${range.endByte}`
@@ -99,10 +98,10 @@ export function assessSecurity(
     ) {
       const injection =
         /\b(?:ignore|disregard)\s+(?:all\s+)?(?:previous|prior)\s+instructions\b|<system>|system prompt|developer message/i.exec(
-          text
+          byteText
         );
       if (injection?.index !== undefined) {
-        const range = byteRange(text, injection.index, injection[0]);
+        const range = byteRange(injection.index, injection[0]);
         findings.push({
           findingId: deterministicUuid(
             `${source.sourceId}:indirect-prompt-injection:${range.startByte}:${range.endByte}`
@@ -127,13 +126,46 @@ export function assessSecurity(
       left.startByte - right.startByte ||
       left.endByte - right.endByte
   );
+  const sourceIdentities = sources
+    .map((source) => ({
+      sourceId: source.sourceId,
+      trustClass: source.trustClass,
+      sha256: sha256Base64Url(source.bytes),
+      byteLength: source.bytes.length
+    }))
+    .sort((left, right) =>
+      Buffer.compare(
+        Buffer.from(left.sourceId, "utf8"),
+        Buffer.from(right.sourceId, "utf8")
+      )
+    );
   const unsigned = {
+    sources: sourceIdentities,
     findings: ordered,
     externalLiveSendDefault: "blocked" as const,
     contentTelemetry: "disabled" as const,
     producer: producer()
   };
   return { ...unsigned, digest: canonicalJsonDigest(unsigned) };
+}
+
+export function validateSecurityAssessment(input: {
+  readonly assessment: SecurityAssessment;
+  readonly sources: readonly {
+    readonly sourceId: string;
+    readonly bytes: Buffer;
+    readonly trustClass: TrustClass;
+  }[];
+}): Result<void> {
+  const recomputed = assessSecurity(input.sources);
+  return canonicalJsonDigest(input.assessment) ===
+      canonicalJsonDigest(recomputed) &&
+    input.assessment.digest === recomputed.digest
+    ? success(undefined)
+    : failure(
+        "INTEGRITY_ERROR",
+        "Security assessment does not match assessed source bytes"
+      );
 }
 
 function placeholder(input: {
@@ -162,6 +194,30 @@ export function createShareableRedactedView(input: {
   readonly mode: "random" | "hmac";
   readonly hmacKey?: Buffer;
 }): Result<ShareableRedactedView> {
+  const assessedSource = input.assessment.sources.find(
+    (source) => source.sourceId === input.sourceId
+  );
+  if (
+    assessedSource === undefined ||
+    assessedSource.sha256 !== sha256Base64Url(input.bytes) ||
+    assessedSource.byteLength !== input.bytes.length
+  ) {
+    return failure(
+      "INTEGRITY_ERROR",
+      "Redacted source does not match the security assessment"
+    );
+  }
+  const assessment = validateSecurityAssessment({
+    assessment: input.assessment,
+    sources: [
+      {
+        sourceId: assessedSource.sourceId,
+        bytes: input.bytes,
+        trustClass: assessedSource.trustClass
+      }
+    ]
+  });
+  if (!assessment.ok) return assessment;
   const findings = input.assessment.findings
     .filter(
       (finding) =>
@@ -181,6 +237,7 @@ export function createShareableRedactedView(input: {
       "Indirect prompt injection must be removed or reviewed, not redacted automatically"
     );
   }
+
   const chunks: Buffer[] = [];
   const mappings: RedactionMapping[] = [];
   let sourceOffset = 0;
@@ -221,6 +278,7 @@ export function createShareableRedactedView(input: {
       cause: error instanceof Error ? error.message : String(error)
     });
   }
+
   chunks.push(input.bytes.subarray(sourceOffset));
   const bytes = Buffer.concat(chunks);
   const unsigned = {
@@ -237,11 +295,139 @@ export function createShareableRedactedView(input: {
   });
 }
 
+export function validateShareableRedactedView(input: {
+  readonly sourceBytes: Buffer;
+  readonly assessment: SecurityAssessment;
+  readonly view: ShareableRedactedView;
+  readonly hmacKey?: Buffer;
+}): Result<void> {
+  const source = input.assessment.sources.find(
+    (item) => item.sourceId === input.view.sourceId
+  );
+  if (
+    source === undefined ||
+    source.sha256 !== sha256Base64Url(input.sourceBytes) ||
+    source.byteLength !== input.sourceBytes.length
+  ) {
+    return failure(
+      "INTEGRITY_ERROR",
+      "Redacted view source does not match the security assessment"
+    );
+  }
+  const findings = input.assessment.findings
+    .filter(
+      (finding) =>
+        finding.sourceId === input.view.sourceId &&
+        finding.kind !== "indirect-prompt-injection"
+    )
+    .sort((left, right) => left.startByte - right.startByte);
+  if (
+    findings.length !== input.view.mappings.length ||
+    input.view.sourceSha256 !== source.sha256 ||
+    input.view.sha256 !== sha256Base64Url(input.view.bytes)
+  ) {
+    return failure("INTEGRITY_ERROR", "Redacted view metadata is inconsistent");
+  }
+  const chunks: Buffer[] = [];
+  let sourceOffset = 0;
+  let outputOffset = 0;
+  for (const [index, finding] of findings.entries()) {
+    const mapping = input.view.mappings[index];
+    if (
+      mapping === undefined ||
+      mapping.findingId !== finding.findingId ||
+      mapping.sourceStartByte !== finding.startByte ||
+      mapping.sourceEndByte !== finding.endByte ||
+      mapping.outputStartByte < outputOffset
+    ) {
+      return failure(
+        "INTEGRITY_ERROR",
+        "Redacted view mappings are not one-to-one and ordered"
+      );
+    }
+    const literal = input.sourceBytes.subarray(
+      sourceOffset,
+      finding.startByte
+    );
+    chunks.push(literal);
+    outputOffset += literal.length;
+    if (mapping.outputStartByte !== outputOffset) {
+      return failure("INTEGRITY_ERROR", "Redacted output offset is invalid");
+    }
+    const replacement = Buffer.from(mapping.placeholder, "utf8");
+    if (input.view.mode === "random") {
+      if (
+        !new RegExp(
+          `^\\[REDACTED_${finding.kind}_[A-Za-z0-9_-]{16}\\]$`
+        ).test(mapping.placeholder)
+      ) {
+        return failure(
+          "INTEGRITY_ERROR",
+          "Random redaction placeholder is invalid"
+        );
+      }
+    } else {
+      if (input.hmacKey === undefined || input.hmacKey.length < 32) {
+        return failure(
+          "INTEGRITY_ERROR",
+          "HMAC redaction validation requires the original key"
+        );
+      }
+      const expected = placeholder({
+        finding,
+        secretBytes: input.sourceBytes.subarray(
+          finding.startByte,
+          finding.endByte
+        ),
+        mode: "hmac",
+        hmacKey: input.hmacKey
+      });
+      if (mapping.placeholder !== expected) {
+        return failure(
+          "INTEGRITY_ERROR",
+          "HMAC redaction placeholder is invalid"
+        );
+      }
+    }
+    chunks.push(replacement);
+    outputOffset += replacement.length;
+    if (mapping.outputEndByte !== outputOffset) {
+      return failure("INTEGRITY_ERROR", "Redacted placeholder length is invalid");
+    }
+    sourceOffset = finding.endByte;
+  }
+  chunks.push(input.sourceBytes.subarray(sourceOffset));
+  const reconstructedView = Buffer.concat(chunks);
+  const unsigned = {
+    sourceId: input.view.sourceId,
+    sourceSha256: input.view.sourceSha256,
+    sha256: input.view.sha256,
+    mappings: input.view.mappings,
+    mode: input.view.mode
+  };
+  if (
+    !reconstructedView.equals(input.view.bytes) ||
+    input.view.digest !== canonicalJsonDigest(unsigned)
+  ) {
+    return failure(
+      "INTEGRITY_ERROR",
+      "Redacted view bytes or digest are invalid"
+    );
+  }
+  return success(undefined);
+}
+
 export function authorizeExternalSend(input: {
   readonly payload: Buffer;
   readonly assessment: SecurityAssessment;
   readonly explicitApproval: boolean;
   readonly redactedView?: ShareableRedactedView;
+  readonly assessedSource: {
+    readonly sourceId: string;
+    readonly bytes: Buffer;
+    readonly trustClass: TrustClass;
+  };
+  readonly redactionHmacKey?: Buffer;
 }): Result<ExternalSendAuthorization> {
   if (!input.explicitApproval) {
     return failure(
@@ -250,6 +436,37 @@ export function authorizeExternalSend(input: {
     );
   }
   const payloadSha256 = sha256Base64Url(input.payload);
+  const boundAssessment = validateSecurityAssessment({
+    assessment: input.assessment,
+    sources: [input.assessedSource]
+  });
+  if (!boundAssessment.ok) return boundAssessment;
+  if (input.redactedView === undefined) {
+    if (
+      sha256Base64Url(input.assessedSource.bytes) !== payloadSha256 ||
+      input.assessedSource.bytes.length !== input.payload.length
+    ) {
+      return failure(
+        "INTEGRITY_ERROR",
+        "Security assessment is not bound to the outbound payload"
+      );
+    }
+  } else {
+    const view = validateShareableRedactedView({
+      sourceBytes: input.assessedSource.bytes,
+      assessment: input.assessment,
+      view: input.redactedView,
+      ...(input.redactionHmacKey === undefined
+        ? {}
+        : { hmacKey: input.redactionHmacKey })
+    });
+    if (!view.ok || input.redactedView.sha256 !== payloadSha256) {
+      return failure(
+        "INTEGRITY_ERROR",
+        "Outbound payload is not the validated redacted view"
+      );
+    }
+  }
   const blocking = input.assessment.findings.filter(
     (finding) => finding.blocking
   );
@@ -286,7 +503,19 @@ export function validateExternalSendAuthorization(input: {
   readonly payload: Buffer;
   readonly assessment: SecurityAssessment;
   readonly authorization: ExternalSendAuthorization;
+  readonly assessedSource: {
+    readonly sourceId: string;
+    readonly bytes: Buffer;
+    readonly trustClass: TrustClass;
+  };
+  readonly redactedView?: ShareableRedactedView;
+  readonly redactionHmacKey?: Buffer;
 }): Result<void> {
+  const boundAssessment = validateSecurityAssessment({
+    assessment: input.assessment,
+    sources: [input.assessedSource]
+  });
+  if (!boundAssessment.ok) return boundAssessment;
   const unsigned = {
     explicitApproval: input.authorization.explicitApproval,
     payloadSha256: input.authorization.payloadSha256,
@@ -297,6 +526,7 @@ export function validateExternalSendAuthorization(input: {
       : { redactedViewDigest: input.authorization.redactedViewDigest })
   };
   if (
+    input.authorization.explicitApproval !== true ||
     input.authorization.digest !== canonicalJsonDigest(unsigned) ||
     input.authorization.payloadSha256 !== sha256Base64Url(input.payload) ||
     input.authorization.securityAssessmentDigest !== input.assessment.digest
@@ -306,10 +536,50 @@ export function validateExternalSendAuthorization(input: {
       "External send authorization does not bind payload and security assessment"
     );
   }
+  if (input.redactedView === undefined) {
+    if (
+      input.assessment.findings.some((finding) => finding.blocking) ||
+      sha256Base64Url(input.assessedSource.bytes) !==
+        input.authorization.payloadSha256 ||
+      input.assessedSource.bytes.length !== input.payload.length
+    ) {
+      return failure(
+        "INTEGRITY_ERROR",
+        "Authorization assessment is not bound to safe outbound bytes"
+      );
+    }
+  } else {
+    if (input.authorization.redactedViewDigest !== input.redactedView.digest) {
+      return failure("INTEGRITY_ERROR", "Redacted authorization is incomplete");
+    }
+    const assessment = validateSecurityAssessment({
+      assessment: input.assessment,
+      sources: [input.assessedSource]
+    });
+    if (!assessment.ok) return assessment;
+    const view = validateShareableRedactedView({
+      sourceBytes: input.assessedSource.bytes,
+      assessment: input.assessment,
+      view: input.redactedView,
+      ...(input.redactionHmacKey === undefined
+        ? {}
+        : { hmacKey: input.redactionHmacKey })
+    });
+    if (
+      !view.ok ||
+      input.redactedView.sha256 !== sha256Base64Url(input.payload) ||
+      input.assessment.findings.some(
+        (finding) =>
+          finding.blocking &&
+          finding.kind === "indirect-prompt-injection"
+      )
+    ) {
+      return failure("INTEGRITY_ERROR", "Redacted authorization view is invalid");
+    }
+  }
   return success(undefined);
 }
 
 export const securityAssessmentProducer = Object.freeze({
   metadata: producer()
 });
-

@@ -22,6 +22,7 @@ import {
   evaluationMarkdown,
   runPairedEvaluation
 } from "../../src/evaluation/harness.js";
+import { parseEvaluationObservation } from "../../src/evaluation/harness.js";
 import {
   createLunaAdapter,
   createRohitCqAdapter,
@@ -72,7 +73,16 @@ function observation(
     modelLatencyMs: 50,
     decisions: 1,
     tools: prepared ? 1 : 0,
-    permissions: 0
+    permissions: 0,
+    execution: {
+      adapterProducerId: plan.settings.adapterId,
+      executableDigest: canonicalJsonDigest("executable"),
+      protocolDigest: canonicalJsonDigest("protocol"),
+      actualModelId: plan.settings.modelId,
+      actualSettingsDigest: canonicalJsonDigest(plan.settings),
+      sessionId: `session-${plan.trialId}`,
+      newSession: true
+    }
   };
 }
 
@@ -107,6 +117,33 @@ describe("paired evaluation harness", () => {
       runner: { run: async () => success(observation(manifest.plans[0] as EvaluationTrialPlan)) }
     });
     expect(blocked.ok).toBe(false);
+    const stale = await runPairedEvaluation({
+      manifest: { ...manifest, liveOptIn: true },
+      runner: {
+        run: async (plan) => success(observation(plan))
+      }
+    });
+    expect(stale.ok).toBe(false);
+  });
+
+  it("replays deterministic counterbalanced order from the seed", () => {
+    const input = {
+      suiteId: "counterbalanced",
+      cases,
+      settings: {
+        modelId: "model",
+        permissionDigest: canonicalJsonDigest("permissions"),
+        adapterId: "adapter"
+      },
+      liveOptIn: false,
+      createdAt: "2026-01-01T00:00:00.000Z"
+    };
+    const first = createReplayManifest({ ...input, seed: 42 });
+    const repeated = createReplayManifest({ ...input, seed: 42 });
+    const changed = createReplayManifest({ ...input, seed: 43 });
+    expect(first.digest).toBe(repeated.digest);
+    expect(first.plans).toEqual(repeated.plans);
+    expect(changed.plans).not.toEqual(first.plans);
   });
 
   it("reports paired discordance, bootstrap, effect size, and all formats", async () => {
@@ -131,7 +168,26 @@ describe("paired evaluation harness", () => {
       aaObservations: manifest.plans
         .filter((plan) => plan.arm === "original")
         .slice(0, 3)
-        .map((plan) => observation(plan, false))
+        .flatMap((plan, index) => [
+          {
+            ...observation(plan, false),
+            execution: {
+              ...observation(plan, false).execution,
+              sessionId: `aa-${index}-1`
+            },
+            aaPairId: `aa-${index}`,
+            aaVariant: "A1" as const
+          },
+          {
+            ...observation(plan, false),
+            execution: {
+              ...observation(plan, false).execution,
+              sessionId: `aa-${index}-2`
+            },
+            aaPairId: `aa-${index}`,
+            aaVariant: "A2" as const
+          }
+        ])
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -141,12 +197,62 @@ describe("paired evaluation harness", () => {
     expect(result.value.discordance.preparedWins).toBe(9);
     expect(result.value.reportingFloorMet).toBe(true);
     expect(result.value.bootstrap95[0]).toBeGreaterThan(0);
+    expect(result.value.effectSizeDz).toBeNull();
+    expect(
+      result.value.warnings.some((warning) =>
+        warning.includes("variance is zero")
+      )
+    ).toBe(true);
     expect(result.value.aaNoise).toBeCloseTo(0, 12);
     expect(evaluationJson(result.value)).toContain(manifest.digest);
     expect(evaluationMarkdown(result.value)).toContain("# Paired evaluation");
     expect(evaluationCsv(result.value).split("\n")).toHaveLength(
       result.value.scores.length + 1
     );
+  });
+
+  it("reports systematic A/A paired differences as noise", async () => {
+    const manifest = createReplayManifest({
+      suiteId: "aa-noise",
+      cases: [cases[0] as EvaluationCase],
+      settings: {
+        modelId: "model",
+        permissionDigest: canonicalJsonDigest("permissions"),
+        adapterId: "adapter"
+      },
+      seed: 7,
+      liveOptIn: true,
+      trialsPerArm: 1
+    });
+    const plan = manifest.plans.find(
+      (candidate) => candidate.arm === "original"
+    ) as EvaluationTrialPlan;
+    const base = observation(plan, false);
+    const result = await runPairedEvaluation({
+      manifest,
+      runner: { run: async (trial) => success(observation(trial)) },
+      aaObservations: [
+        {
+          ...base,
+          aaPairId: "aa-systematic",
+          aaVariant: "A1",
+          execution: { ...base.execution, sessionId: "aa-systematic-1" }
+        },
+        {
+          ...base,
+          taskSuccess: true,
+          visibleEvidenceIds: ["evidence"],
+          distinctFailureIds: ["failure"],
+          citations: ["src/a.ts:1"],
+          aaPairId: "aa-systematic",
+          aaVariant: "A2",
+          execution: { ...base.execution, sessionId: "aa-systematic-2" }
+        }
+      ]
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.aaNoise).toBeGreaterThan(0);
   });
 
   it("fails mismatched model/settings/session observations", async () => {
@@ -185,6 +291,7 @@ describe("paired evaluation harness", () => {
       liveOptIn: true,
       trialsPerArm: 1
     });
+
     const result = await runPairedEvaluation({
       manifest,
       runner: { run: async (plan) => success(observation(plan)) }
@@ -195,7 +302,44 @@ describe("paired evaluation harness", () => {
     expect(result.value.warnings.length).toBeGreaterThan(0);
   });
 
-  it("loads neutral fixtures and keeps Rohit/Luna adapters external-root only", () => {
+  it("rejects incomplete plans and invalid observation numbers", async () => {
+    const manifest = createReplayManifest({
+      suiteId: "invalid",
+      cases: [cases[0] as EvaluationCase],
+      settings: {
+        modelId: "model",
+        permissionDigest: canonicalJsonDigest("permissions"),
+        adapterId: "adapter"
+      },
+      seed: 10,
+      liveOptIn: true
+    });
+    const { digest: _digest, ...unsigned } = manifest;
+    const incompleteUnsigned = {
+      ...unsigned,
+      plans: unsigned.plans.slice(1)
+    };
+    const incomplete = {
+      ...incompleteUnsigned,
+      digest: canonicalJsonDigest(incompleteUnsigned)
+    };
+    expect(
+      (
+        await runPairedEvaluation({
+          manifest: incomplete,
+          runner: { run: async (plan) => success(observation(plan)) }
+        })
+      ).ok
+    ).toBe(false);
+    expect(
+      parseEvaluationObservation({
+        ...observation(manifest.plans[0] as EvaluationTrialPlan),
+        modelLatencyMs: Number.NaN
+      }).ok
+    ).toBe(false);
+  });
+
+  it("loads neutral fixtures and keeps Rohit/Luna adapters external-root only", async () => {
     const fixtures = new ExternalLocalFixtureAdapter(resolve("fixtures"));
     const loaded = fixtures.loadCases("evaluation/neutral-cases.json");
     expect(loaded.ok).toBe(true);
@@ -226,13 +370,33 @@ describe("paired evaluation harness", () => {
         command: process.execPath,
         args: ["--version"]
       };
-      expect(createRohitCqAdapter(input).metadata.producerId).toContain(
+      const cqAdapter = createRohitCqAdapter(input);
+      expect(cqAdapter.metadata.producerId).toContain(
         "rohit.cq"
       );
       expect(createRohitMfAdapter(input).metadata.producerId).toContain(
         "rohit.mf"
       );
       expect(createLunaAdapter(input).metadata.producerId).toContain("luna");
+      expect(
+        (
+          await cqAdapter.run({
+            plan: createReplayManifest({
+              suiteId: "disabled-external",
+              cases: [cases[0] as EvaluationCase],
+              settings: {
+                modelId: "model",
+                permissionDigest: canonicalJsonDigest("permissions"),
+                adapterId: cqAdapter.metadata.producerId
+              },
+              seed: 1,
+              liveOptIn: true,
+              trialsPerArm: 1
+            }).plans[0] as EvaluationTrialPlan,
+            testCase: cases[0] as EvaluationCase
+          })
+        ).ok
+      ).toBe(false);
     } finally {
       rmSync(directory, { recursive: true, force: true });
       rmSync(outside, { recursive: true, force: true });

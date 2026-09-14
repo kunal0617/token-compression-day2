@@ -10,6 +10,10 @@ import {
   HostedCopilotHelperTransport,
   LocalOpenAiCompatibleHelperTransport
 } from "../../src/helper/transports.js";
+import {
+  assessSecurity,
+  authorizeExternalSend
+} from "../../src/security/security.js";
 
 const producer: ProducerMetadata = {
   producerId: "test.transport",
@@ -38,6 +42,9 @@ function request() {
     maxSuggestions: 3,
     maxQueryCharacters: 200,
     maxPromptCharacters: 4_000,
+    maxResponseBytes: 8_000,
+    maxReasonCharacters: 500,
+    maxEvidenceIdsPerSuggestion: 8,
     timeoutMs: 100
   };
 }
@@ -135,6 +142,11 @@ describe("isolated additive-only evidence helper", () => {
       new SequenceTransport([])
     ).run({ ...request(), maxSuggestions: 99 });
     expect(budget.ok && budget.value.reason).toBe("budget");
+
+    const oversized = await new IsolatedGapSuggestionHelper(
+      new SequenceTransport(["x".repeat(9_000)])
+    ).run(request());
+    expect(oversized.ok && oversized.value.reason).toBe("budget");
   });
 
   it("restricts the OpenAI-compatible helper to loopback", async () => {
@@ -148,15 +160,33 @@ describe("isolated additive-only evidence helper", () => {
     const transport = new LocalOpenAiCompatibleHelperTransport({
       endpoint: "http://127.0.0.1:1234/v1/chat/completions",
       model: "local",
-      fetchImpl: async () =>
+      fetchImpl: async (_input, init) => {
+        expect(init?.redirect).toBe("error");
+        return (
         new Response(
           JSON.stringify({
             choices: [{ message: { content: "{\"status\":\"abstain\"}" } }]
           }),
           { status: 200 }
         )
+        );
+      }
     });
     expect(await transport.complete("prompt", 100)).toContain("abstain");
+    expect(
+      () =>
+        new LocalOpenAiCompatibleHelperTransport({
+          endpoint: "http://[::1]:1234/v1/chat/completions",
+          model: "local"
+        })
+    ).not.toThrow();
+    expect(
+      () =>
+        new LocalOpenAiCompatibleHelperTransport({
+          endpoint: "http://user:password@127.0.0.1:1234/v1/chat/completions",
+          model: "local"
+        })
+    ).toThrow();
   });
 
   it("aborts an isolated hosted helper session on timeout", async () => {
@@ -172,8 +202,53 @@ describe("isolated additive-only evidence helper", () => {
       }),
       stop: async () => []
     }));
-    await expect(transport.complete("prompt", 5)).rejects.toThrow();
+    const prompt = "prompt";
+    const bytes = Buffer.from(prompt, "utf8");
+    const assessedSource = {
+      sourceId: "helper-prompt",
+      bytes,
+      trustClass: "external-untrusted" as const
+    };
+    const assessment = assessSecurity([assessedSource]);
+    const authorization = authorizeExternalSend({
+      payload: bytes,
+      assessment,
+      explicitApproval: true,
+      assessedSource
+    });
+    expect(authorization.ok).toBe(true);
+    if (!authorization.ok) return;
+    await expect(
+      transport.complete(prompt, 5, {
+        networkApproved: true,
+        assessment,
+        authorization: authorization.value,
+        assessedSource
+      })
+    ).rejects.toThrow();
     expect(aborted).toBe(true);
   });
-});
 
+  it("rejects suggestions for obligations already satisfied in the shown snapshot", async () => {
+    const helper = new IsolatedGapSuggestionHelper(
+      new SequenceTransport([
+        JSON.stringify({
+          status: "suggestions",
+          suggestions: [
+            {
+              obligationId: "obligation-1",
+              query: "query",
+              reason: "reason",
+              evidenceIds: ["evidence-1"]
+            }
+          ]
+        })
+      ])
+    );
+    const result = await helper.run({
+      ...request(),
+      obligations: [{ ...obligation, status: "satisfied" }]
+    });
+    expect(result.ok && result.value.reason).toBe("invalid-evidence");
+  });
+});

@@ -28,6 +28,12 @@ export interface SecurityFinding {
 }
 
 export interface SecurityAssessment {
+  readonly sources: readonly {
+    readonly sourceId: string;
+    readonly trustClass: TrustClass;
+    readonly sha256: string;
+    readonly byteLength: number;
+  }[];
   readonly findings: readonly SecurityFinding[];
   readonly externalLiveSendDefault: "blocked";
   readonly contentTelemetry: "disabled";
@@ -61,4 +67,3 @@ export interface ExternalSendAuthorization {
   readonly redactedViewDigest?: string;
   readonly digest: string;
 }
-

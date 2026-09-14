@@ -3,6 +3,18 @@ import type {
 } from "../contracts/helper.js";
 import type { ProducerMetadata } from "../contracts/providers.js";
 import { canonicalJsonDigest } from "../core/canonical.js";
+import {
+  validateExternalSendAuthorization
+} from "../security/security.js";
+import { lookup } from "node:dns/promises";
+
+function isLoopbackAddress(address: string): boolean {
+  return (
+    address === "::1" ||
+    address.startsWith("127.") ||
+    address.toLowerCase().startsWith("::ffff:127.")
+  );
+}
 
 function metadata(
   producerId: string,
@@ -46,7 +58,21 @@ export class HostedCopilotHelperTransport implements IsolatedHelperTransport {
     this.#factory = factory;
   }
 
-  async complete(prompt: string, timeoutMs: number): Promise<string> {
+  async complete(
+    prompt: string,
+    timeoutMs: number,
+    security?: Parameters<IsolatedHelperTransport["complete"]>[2]
+  ): Promise<string> {
+    if (security?.networkApproved !== true) {
+      throw new Error("Hosted helper network approval is required");
+    }
+    const authorized = validateExternalSendAuthorization({
+      payload: Buffer.from(prompt, "utf8"),
+      assessment: security.assessment,
+      authorization: security.authorization,
+      assessedSource: security.assessedSource
+    });
+    if (!authorized.ok) throw new Error(authorized.error.message);
     const client = await this.#factory();
     await client.start();
     const session = await client.createSession({
@@ -95,6 +121,7 @@ export class LocalOpenAiCompatibleHelperTransport
     ["localhost-only", "chat-completions", "no-tools", "timeout"]
   );
   readonly #endpoint: URL;
+  readonly #hostname: string;
   readonly #model: string;
   readonly #fetch: typeof fetch;
 
@@ -104,8 +131,12 @@ export class LocalOpenAiCompatibleHelperTransport
     readonly fetchImpl?: typeof fetch;
   }) {
     this.#endpoint = new URL(input.endpoint);
+    this.#hostname = this.#endpoint.hostname.replace(/^\[|\]$/g, "");
     if (
-      !["localhost", "127.0.0.1", "::1"].includes(this.#endpoint.hostname)
+      !["http:", "https:"].includes(this.#endpoint.protocol) ||
+      this.#endpoint.username.length > 0 ||
+      this.#endpoint.password.length > 0 ||
+      !["localhost", "127.0.0.1", "::1"].includes(this.#hostname)
     ) {
       throw new TypeError("Local helper endpoint must resolve to loopback");
     }
@@ -114,6 +145,13 @@ export class LocalOpenAiCompatibleHelperTransport
   }
 
   async complete(prompt: string, timeoutMs: number): Promise<string> {
+    const addresses = await lookup(this.#hostname, { all: true });
+    if (
+      addresses.length === 0 ||
+      addresses.some((entry) => !isLoopbackAddress(entry.address))
+    ) {
+      throw new Error("Local helper hostname did not resolve to loopback");
+    }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
@@ -126,7 +164,8 @@ export class LocalOpenAiCompatibleHelperTransport
           tools: [],
           stream: false
         }),
-        signal: controller.signal
+        signal: controller.signal,
+        redirect: "error"
       });
       if (!response.ok) {
         throw new Error(`Local helper HTTP ${response.status}`);
@@ -140,4 +179,3 @@ export class LocalOpenAiCompatibleHelperTransport
     }
   }
 }
-

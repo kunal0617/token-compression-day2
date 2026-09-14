@@ -69,6 +69,17 @@ export interface EvaluationObservation {
   readonly decisions: number;
   readonly tools: number;
   readonly permissions: number;
+  readonly execution: {
+    readonly adapterProducerId: string;
+    readonly executableDigest: string;
+    readonly protocolDigest: string;
+    readonly actualModelId: string;
+    readonly actualSettingsDigest: string;
+    readonly sessionId: string;
+    readonly newSession: true;
+  };
+  readonly aaPairId?: string;
+  readonly aaVariant?: "A1" | "A2";
 }
 
 export interface EvaluationScore {
@@ -97,7 +108,7 @@ export interface PairedEvaluationReport {
   readonly originalMean: number;
   readonly preparedMean: number;
   readonly meanDifference: number;
-  readonly effectSizeDz: number;
+  readonly effectSizeDz: number | null;
   readonly bootstrap95: readonly [number, number];
   readonly discordance: {
     readonly preparedWins: number;
@@ -109,4 +120,3 @@ export interface PairedEvaluationReport {
   readonly warnings: readonly string[];
   readonly producer: ProducerMetadata;
 }
-

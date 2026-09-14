@@ -98,6 +98,20 @@ function noOp(
   });
 }
 
+function deepFreeze<T>(value: T): T {
+  if (
+    value !== null &&
+    typeof value === "object" &&
+    !ArrayBuffer.isView(value)
+  ) {
+    for (const entry of Object.values(value as Record<string, unknown>)) {
+      deepFreeze(entry);
+    }
+    Object.freeze(value);
+  }
+  return value;
+}
+
 export class IsolatedGapSuggestionHelper
   implements HelperModelAdapter<GapSuggestionRequest, GapSuggestion>
 {
@@ -116,13 +130,44 @@ export class IsolatedGapSuggestionHelper
   }
 
   async run(
-    request: GapSuggestionRequest
+    input: GapSuggestionRequest
   ): Promise<Result<GapSuggestionResult>> {
+    const cloned = structuredClone(input);
+    const request = deepFreeze({
+      ...cloned,
+      ...(input.hostedSecurity === undefined
+        ? {}
+        : {
+            hostedSecurity: {
+              ...cloned.hostedSecurity,
+              assessedSource: {
+                ...cloned.hostedSecurity?.assessedSource,
+                bytes: Buffer.from(
+                  input.hostedSecurity.assessedSource.bytes
+                )
+              }
+            }
+          })
+    }) as GapSuggestionRequest;
     if (
+      !Number.isSafeInteger(request.maxSuggestions) ||
       request.maxSuggestions <= 0 ||
       request.maxSuggestions > 8 ||
+      !Number.isSafeInteger(request.maxQueryCharacters) ||
       request.maxQueryCharacters <= 0 ||
       request.maxQueryCharacters > 1_000 ||
+      !Number.isSafeInteger(request.maxPromptCharacters) ||
+      request.maxPromptCharacters <= 0 ||
+      !Number.isSafeInteger(request.maxResponseBytes) ||
+      request.maxResponseBytes <= 0 ||
+      request.maxResponseBytes > 128 * 1024 ||
+      !Number.isSafeInteger(request.maxReasonCharacters) ||
+      request.maxReasonCharacters <= 0 ||
+      request.maxReasonCharacters > 2_000 ||
+      !Number.isSafeInteger(request.maxEvidenceIdsPerSuggestion) ||
+      request.maxEvidenceIdsPerSuggestion < 0 ||
+      request.maxEvidenceIdsPerSuggestion > 32 ||
+      !Number.isSafeInteger(request.timeoutMs) ||
       request.timeoutMs <= 0
     ) {
       return noOp(this.metadata, "budget", 0);
@@ -132,14 +177,20 @@ export class IsolatedGapSuggestionHelper
       return noOp(this.metadata, "budget", 0);
     }
     const obligationIds = new Set(
-      request.obligations.map((obligation) => obligation.obligationId)
+      request.obligations
+        .filter((obligation) => obligation.status !== "satisfied")
+        .map((obligation) => obligation.obligationId)
     );
     const evidenceIds = new Set(request.availableEvidenceIds);
     let attempts = 0;
     for (; attempts < 2; attempts += 1) {
       let raw: string;
       try {
-        raw = await this.#transport.complete(prompt, request.timeoutMs);
+        raw = await this.#transport.complete(
+          prompt,
+          request.timeoutMs,
+          request.hostedSecurity
+        );
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         return noOp(
@@ -147,6 +198,9 @@ export class IsolatedGapSuggestionHelper
           /timeout|abort/i.test(message) ? "timeout" : "refusal",
           attempts + 1
         );
+      }
+      if (Buffer.byteLength(raw, "utf8") > request.maxResponseBytes) {
+        return noOp(this.metadata, "budget", attempts + 1);
       }
       let parsedJson: unknown;
       try {
@@ -170,12 +224,16 @@ export class IsolatedGapSuggestionHelper
         if (
           !obligationIds.has(suggestion.obligationId) ||
           suggestion.query.length > request.maxQueryCharacters ||
+          suggestion.reason.length > request.maxReasonCharacters ||
+          suggestion.evidenceIds.length >
+            request.maxEvidenceIdsPerSuggestion ||
           suggestion.evidenceIds.some(
             (evidenceId) => !evidenceIds.has(evidenceId)
           )
         ) {
           return noOp(this.metadata, "invalid-evidence", attempts + 1);
         }
+
         suggestions.push({
           suggestionId: deterministicUuid(
             `${request.runId}:${suggestion.obligationId}:${suggestion.query}`

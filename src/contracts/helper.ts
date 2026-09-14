@@ -1,5 +1,9 @@
 import type { EvidenceObligation } from "./providers.js";
 import type { ProducerMetadata } from "./providers.js";
+import type {
+  ExternalSendAuthorization,
+  SecurityAssessment
+} from "./security.js";
 
 export interface GapSuggestionRequest {
   readonly runId: string;
@@ -8,7 +12,20 @@ export interface GapSuggestionRequest {
   readonly maxSuggestions: number;
   readonly maxQueryCharacters: number;
   readonly maxPromptCharacters: number;
+  readonly maxResponseBytes: number;
+  readonly maxReasonCharacters: number;
+  readonly maxEvidenceIdsPerSuggestion: number;
   readonly timeoutMs: number;
+  readonly hostedSecurity?: {
+    readonly networkApproved: true;
+    readonly assessment: SecurityAssessment;
+    readonly authorization: ExternalSendAuthorization;
+    readonly assessedSource: {
+      readonly sourceId: string;
+      readonly bytes: Buffer;
+      readonly trustClass: "external-untrusted";
+    };
+  };
 }
 
 export interface GapSuggestion {
@@ -36,6 +53,9 @@ export interface GapSuggestionResult {
 
 export interface IsolatedHelperTransport {
   readonly metadata: ProducerMetadata;
-  complete(prompt: string, timeoutMs: number): Promise<string>;
+  complete(
+    prompt: string,
+    timeoutMs: number,
+    security?: GapSuggestionRequest["hostedSecurity"]
+  ): Promise<string>;
 }
-

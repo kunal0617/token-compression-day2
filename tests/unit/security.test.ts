@@ -4,8 +4,11 @@ import {
   assessSecurity,
   authorizeExternalSend,
   createShareableRedactedView,
-  validateExternalSendAuthorization
+  validateExternalSendAuthorization,
+  validateShareableRedactedView
 } from "../../src/security/security.js";
+import { canonicalJsonDigest } from "../../src/core/canonical.js";
+import { sha256Base64Url } from "../../src/core/hash.js";
 
 describe("security and shareable views", () => {
   it("detects high-confidence secrets without retaining secret text", () => {
@@ -22,6 +25,36 @@ describe("security and shareable views", () => {
     expect(assessment.findings[0]?.redactedPreview).not.toContain(token);
     expect(assessment.externalLiveSendDefault).toBe("blocked");
     expect(assessment.contentTelemetry).toBe("disabled");
+  });
+
+  it("reports exact byte ranges through invalid UTF-8", () => {
+    const token = `ghp_${"Z".repeat(40)}`;
+    const prefix = Buffer.from([0xff, 0xfe, 0x80, 0x20]);
+    const bytes = Buffer.concat([
+      prefix,
+      Buffer.from(token, "ascii"),
+      Buffer.from([0xc0])
+    ]);
+    const assessment = assessSecurity([
+      {
+        sourceId: "invalid-utf8",
+        bytes,
+        trustClass: "external-untrusted"
+      }
+    ]);
+    expect(assessment.findings).toHaveLength(1);
+    expect(assessment.findings[0]?.startByte).toBe(prefix.length);
+    expect(assessment.findings[0]?.endByte).toBe(
+      prefix.length + Buffer.byteLength(token, "ascii")
+    );
+    expect(
+      bytes
+        .subarray(
+          assessment.findings[0]?.startByte,
+          assessment.findings[0]?.endByte
+        )
+        .toString("ascii")
+    ).toBe(token);
   });
 
   it("creates random or keyed-HMAC source-linked redacted views", () => {
@@ -65,6 +98,21 @@ describe("security and shareable views", () => {
     if (!hmacOne.ok || !hmacTwo.ok) return;
     expect(hmacOne.value.sha256).toBe(hmacTwo.value.sha256);
     expect(
+      validateShareableRedactedView({
+        sourceBytes: bytes,
+        assessment,
+        view: hmacOne.value,
+        hmacKey: key
+      }).ok
+    ).toBe(true);
+    expect(
+      validateShareableRedactedView({
+        sourceBytes: bytes,
+        assessment,
+        view: hmacOne.value
+      }).ok
+    ).toBe(false);
+    expect(
       createShareableRedactedView({
         sourceId: "source",
         bytes,
@@ -80,17 +128,24 @@ describe("security and shareable views", () => {
     const cleanAssessment = assessSecurity([
       { sourceId: "clean", bytes: clean, trustClass: "user-instruction" }
     ]);
+    const cleanSource = {
+      sourceId: "clean",
+      bytes: clean,
+      trustClass: "user-instruction" as const
+    };
     expect(
       authorizeExternalSend({
         payload: clean,
         assessment: cleanAssessment,
-        explicitApproval: false
+        explicitApproval: false,
+        assessedSource: cleanSource
       }).ok
     ).toBe(false);
     const cleanAuthorization = authorizeExternalSend({
       payload: clean,
       assessment: cleanAssessment,
-      explicitApproval: true
+      explicitApproval: true,
+      assessedSource: cleanSource
     });
     expect(cleanAuthorization.ok).toBe(true);
     if (!cleanAuthorization.ok) return;
@@ -98,7 +153,8 @@ describe("security and shareable views", () => {
       validateExternalSendAuthorization({
         payload: clean,
         assessment: cleanAssessment,
-        authorization: cleanAuthorization.value
+        authorization: cleanAuthorization.value,
+        assessedSource: cleanSource
       }).ok
     ).toBe(true);
 
@@ -106,11 +162,17 @@ describe("security and shareable views", () => {
     const assessment = assessSecurity([
       { sourceId: "secret", bytes: secret, trustClass: "repository-source" }
     ]);
+    const secretSource = {
+      sourceId: "secret",
+      bytes: secret,
+      trustClass: "repository-source" as const
+    };
     expect(
       authorizeExternalSend({
         payload: secret,
         assessment,
-        explicitApproval: true
+        explicitApproval: true,
+        assessedSource: secretSource
       }).ok
     ).toBe(false);
     const redacted = createShareableRedactedView({
@@ -126,9 +188,48 @@ describe("security and shareable views", () => {
         payload: redacted.value.bytes,
         assessment,
         explicitApproval: true,
-        redactedView: redacted.value
+        redactedView: redacted.value,
+        assessedSource: secretSource
       }).ok
     ).toBe(true);
+
+    expect(
+      authorizeExternalSend({
+        payload: secret,
+        assessment: cleanAssessment,
+        explicitApproval: true,
+        assessedSource: secretSource
+      }).ok
+    ).toBe(false);
+    expect(
+      authorizeExternalSend({
+        payload: redacted.value.bytes,
+        assessment,
+        explicitApproval: true,
+        redactedView: {
+          ...redacted.value,
+          mappings: []
+        },
+        assessedSource: secretSource
+      }).ok
+    ).toBe(false);
+
+    const forgedUnsigned = {
+      explicitApproval: true as const,
+      payloadSha256: sha256Base64Url(secret),
+      securityAssessmentDigest: assessment.digest
+    };
+    expect(
+      validateExternalSendAuthorization({
+        payload: secret,
+        assessment,
+        authorization: {
+          ...forgedUnsigned,
+          digest: canonicalJsonDigest(forgedUnsigned)
+        },
+        assessedSource: secretSource
+      }).ok
+    ).toBe(false);
   });
 
   it("blocks indirect prompt injection instead of auto-redacting it", () => {
@@ -139,6 +240,11 @@ describe("security and shareable views", () => {
     const assessment = assessSecurity([
       { sourceId: "log", bytes, trustClass: "build-output" }
     ]);
+    const assessedSource = {
+      sourceId: "log",
+      bytes,
+      trustClass: "build-output" as const
+    };
     expect(
       assessment.findings.some(
         (finding) => finding.kind === "indirect-prompt-injection"
@@ -156,9 +262,9 @@ describe("security and shareable views", () => {
       authorizeExternalSend({
         payload: bytes,
         assessment,
-        explicitApproval: true
+        explicitApproval: true,
+        assessedSource
       }).ok
     ).toBe(false);
   });
 });
-

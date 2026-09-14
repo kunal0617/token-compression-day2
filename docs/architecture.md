@@ -41,6 +41,7 @@ hashes, slicing, mappings, retrieval, and reconstruction use original bytes.
 | `tui` | Terminal receipt/diff/evidence/gap/retrieval/target review and digest-bound actions | Terminal adapter + pure controller |
 | `adapters/copilot-sdk` | Optional approval-gated empty-mode Copilot session, scoped reads, permissions, events, catalog, and abort | Dynamic SDK adapter |
 | `model` | MF-01/02/03 hard filters, versioned curated eligibility, deterministic scoring, and new-session advice | Pure provider |
+| `helper` | Optional additive-only gap/query suggestions with strict schemas, budgets, isolation, and no-op failures | Isolated transport adapters |
 | `segment` / `protect` | Structural lines and protected closure | Pure |
 | `reduce` | Proposals, benefit checks, and overlap resolution | Pure |
 | `render` | One compact render and mapping creation | Pure |

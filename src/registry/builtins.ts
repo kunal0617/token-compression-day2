@@ -54,6 +54,7 @@ import { typeScriptSemanticEdgeProvider } from "../source/typescript-semantic.js
 import { reviewSubjectProvider } from "../approval/review.js";
 import { optionalCopilotSdkAdapter } from "../adapters/copilot-sdk.js";
 import { deterministicModelFitAdviser } from "../model/advice.js";
+import { isolatedGapSuggestionProducer } from "../helper/isolation.js";
 import { segmentArtifact } from "../segment/segment.js";
 import { VersionedRegistry } from "./registry.js";
 import {
@@ -268,6 +269,7 @@ export function createBuiltinRuntime(): BuiltinRuntime {
     | typeof reviewSubjectProvider
     | typeof optionalCopilotSdkAdapter
     | typeof deterministicModelFitAdviser
+    | typeof isolatedGapSuggestionProducer
   >();
   const preparation = [
     artifactClassifier,
@@ -305,6 +307,8 @@ export function createBuiltinRuntime(): BuiltinRuntime {
     optionalCopilotSdkAdapter
     ,
     deterministicModelFitAdviser
+    ,
+    isolatedGapSuggestionProducer
   ]) {
     const registered = registry.register(producer);
     if (!registered.ok) throw new Error(registered.error.message);

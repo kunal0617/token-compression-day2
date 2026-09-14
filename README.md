@@ -200,6 +200,19 @@ the current model. A different recommendation is advisory and always requires
 an explicitly approved new session; the adviser never silently switches the
 current session or uses learned routing.
 
+## Optional isolated evidence helper
+
+The helper is additive-only: it can suggest bounded retrieval queries for
+unresolved obligation IDs, but it cannot answer the task, alter deterministic
+evidence, use tools/files, or re-enter the main session. Responses use a strict
+schema, prompt/query/suggestion budgets, one syntactic retry, and exact
+obligation/evidence-ID validation.
+
+Abstention, refusal, timeout, malformed output, unknown IDs, or budget excess
+become explicit no-ops. A hosted Copilot empty-session transport and a
+loopback-only OpenAI-compatible transport are available; hosted timeout aborts
+the helper session.
+
 For CI summary logs, routine path/version/timestamp/identifier occurrences stay
 in the manifest but do not automatically protect neighboring lines. Source
 locations require credible file extensions or diagnostic/stack/compiler

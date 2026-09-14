@@ -138,6 +138,9 @@ export interface ReductionPolicyRequest {
 export interface BuiltinRuntime {
   readonly producers: readonly ProducerMetadata[];
   readonly registryDigest: string;
+  readonly preparationProducers: readonly ProducerMetadata[];
+  readonly preparationRegistryDigest: string;
+  resolveProducer(metadata: ProducerMetadata): boolean;
   classifyArtifact(artifact: ArtifactSnapshot): Result<ArtifactClassification>;
   classifyIntent(prompt: ArtifactSnapshot): Result<IntentClassification>;
   detectOutcome(artifact: ArtifactSnapshot): Result<RunOutcome>;

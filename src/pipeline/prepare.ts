@@ -257,8 +257,8 @@ export async function prepareContext(input: PrepareInput): Promise<PrepareResult
     outcome,
     policy: { nearbySegments },
     producerRegistry: {
-      digest: builtinRuntime.registryDigest,
-      producers: builtinRuntime.producers
+      digest: builtinRuntime.preparationRegistryDigest,
+      producers: builtinRuntime.preparationProducers
     },
     evidence,
     protectedRanges,

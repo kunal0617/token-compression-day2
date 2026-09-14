@@ -7,7 +7,7 @@ import type {
   OutputMapping,
   ValidatedContextPackage
 } from "../contracts/types.js";
-import { canonicalJson } from "../core/canonical.js";
+import { canonicalJson, canonicalJsonDigest } from "../core/canonical.js";
 import { sha256Base64Url } from "../core/hash.js";
 import { assertRange, rangesIntersect } from "../core/ranges.js";
 import { failure, success, type Result } from "../core/result.js";
@@ -123,11 +123,13 @@ export function validateContextPackage(input: {
   if (manifest.formatVersion === 2) {
     if (
       manifest.producerRegistry === undefined ||
-      manifest.producerRegistry.digest !== builtinRuntime.registryDigest ||
-      canonicalJson(manifest.producerRegistry.producers) !==
-        canonicalJson(builtinRuntime.producers) ||
+      manifest.producerRegistry.digest !==
+        canonicalJsonDigest(manifest.producerRegistry.producers) ||
+      !manifest.producerRegistry.producers.every((producer) =>
+        builtinRuntime.resolveProducer(producer)
+      ) ||
       canonicalJson(storedProducers.value) !==
-        canonicalJson(builtinRuntime.producers)
+        canonicalJson(manifest.producerRegistry.producers)
     ) {
       return failure(
         "INTEGRITY_ERROR",

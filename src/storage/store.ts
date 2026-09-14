@@ -864,7 +864,9 @@ export class ContextStore {
            FROM run_producers p
            JOIN runs r ON r.run_id=p.run_id
            WHERE p.run_id=? AND r.status=? AND r.validation_status=?
-           ORDER BY p.producer_id`
+           ORDER BY p.producer_id COLLATE BINARY,
+                    p.version COLLATE BINARY,
+                    p.digest COLLATE BINARY`
         )
         .all(runId, state, validationStatus) as unknown as {
         producer_id: string;

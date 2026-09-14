@@ -54,6 +54,10 @@ import { typeScriptSemanticEdgeProvider } from "../source/typescript-semantic.js
 import { reviewSubjectProvider } from "../approval/review.js";
 import { segmentArtifact } from "../segment/segment.js";
 import { VersionedRegistry } from "./registry.js";
+import {
+  compareProducerMetadata,
+  producerSnapshotMatchesRegistry
+} from "./registry.js";
 
 function metadata(
   producerId: string,
@@ -261,6 +265,15 @@ export function createBuiltinRuntime(): BuiltinRuntime {
     | typeof typeScriptSemanticEdgeProvider
     | typeof reviewSubjectProvider
   >();
+  const preparation = [
+    artifactClassifier,
+    intentClassifier,
+    outcomeDetector,
+    evidenceDetector,
+    segmentProvider,
+    reductionDetector,
+    reductionPolicy
+  ] as const;
   for (const producer of [
     artifactClassifier,
     intentClassifier,
@@ -291,6 +304,18 @@ export function createBuiltinRuntime(): BuiltinRuntime {
   return {
     producers: registry.metadata(),
     registryDigest: registry.digest(),
+    preparationProducers: Object.freeze(
+      preparation
+        .map((producer) => producer.metadata)
+        .sort(compareProducerMetadata)
+    ),
+    preparationRegistryDigest: canonicalJsonDigest(
+      preparation
+        .map((producer) => producer.metadata)
+        .sort(compareProducerMetadata)
+    ),
+    resolveProducer: (producerMetadata) =>
+      producerSnapshotMatchesRegistry([producerMetadata], registry),
     classifyArtifact: (artifact) =>
       artifactClassifier.provide({ artifact }),
     classifyIntent: (prompt) => intentClassifier.provide({ prompt }),

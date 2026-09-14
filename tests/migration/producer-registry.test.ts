@@ -6,11 +6,16 @@ import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 
 import type { CanonicalManifest } from "../../src/contracts/types.js";
+import type { VersionedProducer } from "../../src/contracts/providers.js";
 import { canonicalJson } from "../../src/core/canonical.js";
 import { sha256Base64Url } from "../../src/core/hash.js";
 import { prepareContext } from "../../src/pipeline/prepare.js";
 import { ContextStore } from "../../src/storage/store.js";
 import { verifyStoredRun } from "../../src/validate/validate.js";
+import {
+  producerSnapshotMatchesRegistry,
+  VersionedRegistry
+} from "../../src/registry/registry.js";
 
 describe("producer registry migration", () => {
   it("keeps legacy v1 committed runs verifiable", async () => {
@@ -99,6 +104,53 @@ describe("producer registry migration", () => {
       try {
         expect(verifyStoredRun(store, prepared.value.package.runId).ok).toBe(
           false
+        );
+      } finally {
+        store.close();
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("verifies a prepared producer snapshot after unrelated registry evolution", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "ctxo-registry-evolve-"));
+    const storePath = join(directory, "context.sqlite");
+    try {
+      const prepared = await prepareContext({
+        promptText: "Inspect this trace.",
+        contextTexts: [
+          {
+            label: "evolve.log",
+            text: "long repeated evolution payload\n".repeat(100)
+          }
+        ],
+        storePath
+      });
+      expect(prepared.ok).toBe(true);
+      if (!prepared.ok) return;
+      const producers =
+        prepared.value.package.manifest.producerRegistry?.producers ?? [];
+      const evolved = new VersionedRegistry<VersionedProducer>();
+      for (const metadata of producers) {
+        expect(evolved.register({ metadata }).ok).toBe(true);
+      }
+      expect(
+        evolved.register({
+          metadata: {
+            producerId: "test.unrelated-new-provider",
+            kind: "detector",
+            version: "1.0.0",
+            digest: sha256Base64Url(Buffer.from("unrelated", "utf8"))
+          }
+        }).ok
+      ).toBe(true);
+      expect(producerSnapshotMatchesRegistry(producers, evolved)).toBe(true);
+
+      const store = new ContextStore(storePath);
+      try {
+        expect(verifyStoredRun(store, prepared.value.package.runId).ok).toBe(
+          true
         );
       } finally {
         store.close();

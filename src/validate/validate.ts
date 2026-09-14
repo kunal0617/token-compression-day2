@@ -13,6 +13,7 @@ import { assertRange, rangesIntersect } from "../core/ranges.js";
 import { failure, success, type Result } from "../core/result.js";
 import { renderContext } from "../render/render.js";
 import { splitRawLines } from "../segment/segment.js";
+import { parseHandle } from "../storage/handles.js";
 import type { ContextStore } from "../storage/store.js";
 import { measureTokens } from "../token/tokenizer.js";
 
@@ -374,9 +375,14 @@ export function validateContextPackage(input: {
   for (const omission of manifest.omissions) {
     const artifact = artifactsById.get(omission.artifactId);
     const transform = transformsByOccurrence.get(omission.occurrenceId);
+    const parsedHandle = parseHandle(omission.handle);
     if (
       artifact === undefined ||
       transform === undefined ||
+      !parsedHandle.ok ||
+      parsedHandle.value.occurrenceId !== omission.occurrenceId ||
+      parsedHandle.value.digest !== omission.sha256 ||
+      parsedHandle.value.byteLength !== omission.byteLength ||
       transform.artifactId !== omission.artifactId ||
       transform.startByte !== omission.startByte ||
       transform.endByte !== omission.endByte ||
@@ -500,19 +506,22 @@ export function validateContextPackage(input: {
     );
   }
 
+  const mandatoryEvidence = manifest.evidence.filter(
+    (item) => item.mandatoryInline
+  );
   const evidenceMappings = new Map(
     manifest.evidenceMappings.map((mapping) => [mapping.evidenceId, mapping])
   );
   if (
-    evidenceMappings.size !== manifest.evidence.length ||
-    manifest.evidenceMappings.length !== manifest.evidence.length
+    evidenceMappings.size !== mandatoryEvidence.length ||
+    manifest.evidenceMappings.length !== mandatoryEvidence.length
   ) {
     return failure(
       "INTEGRITY_ERROR",
       "Every evidence occurrence requires its own output mapping"
     );
   }
-  for (const item of manifest.evidence) {
+  for (const item of mandatoryEvidence) {
     const mapping = evidenceMappings.get(item.evidenceId);
     const artifact = artifactsById.get(item.artifactId);
     if (
@@ -534,7 +543,26 @@ export function validateContextPackage(input: {
       mapping.outputStartByte,
       mapping.outputEndByte
     );
+    const containingLiteral = manifest.outputMappings.find(
+      (candidate) =>
+        candidate.kind === "literal" &&
+        candidate.artifactId === item.artifactId &&
+        candidate.sourceStartByte !== undefined &&
+        candidate.sourceEndByte !== undefined &&
+        candidate.sourceStartByte <= item.startByte &&
+        candidate.sourceEndByte >= item.endByte
+    );
+    const expectedOutputStart =
+      containingLiteral?.sourceStartByte === undefined
+        ? undefined
+        : containingLiteral.outputStartByte +
+          item.startByte -
+          containingLiteral.sourceStartByte;
     if (
+      expectedOutputStart === undefined ||
+      mapping.outputStartByte !== expectedOutputStart ||
+      mapping.outputEndByte !==
+        expectedOutputStart + item.endByte - item.startByte ||
       !sourceBytes.equals(outputBytes) ||
       sha256Base64Url(outputBytes) !== item.sha256
     ) {

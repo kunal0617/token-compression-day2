@@ -12,6 +12,7 @@ import { splitRawLines, type LineRecord } from "../segment/segment.js";
 interface EvidenceCandidate extends ByteRange {
   readonly kind: EvidenceKind;
   readonly reason: string;
+  readonly mandatoryInline?: boolean;
 }
 
 function blockRange(
@@ -49,12 +50,18 @@ function addMatchCandidates(
   pattern: RegExp,
   kind: EvidenceKind,
   reason: string,
-  candidates: EvidenceCandidate[]
+  candidates: EvidenceCandidate[],
+  mandatoryInline = true
 ): void {
   const flags = pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`;
   const globalPattern = new RegExp(pattern.source, flags);
   for (const match of line.text.matchAll(globalPattern)) {
-    candidates.push({ ...matchRange(line, match), kind, reason });
+    candidates.push({
+      ...matchRange(line, match),
+      kind,
+      reason,
+      mandatoryInline
+    });
   }
 }
 
@@ -194,7 +201,7 @@ export function extractEvidence(
     );
     addMatchCandidates(
       line,
-      /\b(?:[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|(?:correlation|request|trace)[-_ ]?id\s*[:=]\s*[\w.-]+)\b/i,
+      /\b(?:correlation|request|trace)[-_ ]?id\s*[:=]\s*[\w.-]+\b/i,
       "correlation-id",
       "Correlation identifier",
       candidates
@@ -211,14 +218,16 @@ export function extractEvidence(
       /\b\d{4}-\d{2}-\d{2}[T ][0-2]\d:[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?\b/,
       "timestamp",
       "Timestamp",
-      candidates
+      candidates,
+      false
     );
     addMatchCandidates(
       line,
-      /\b(?:[A-Z]{2,10}-\d+|[A-Fa-f0-9]{7,40})\b/,
+      /\b(?:[A-Z]{2,10}-\d+|[A-Fa-f0-9]{7,40}|[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\b/i,
       "identifier",
       "Diagnostic identifier",
-      candidates
+      candidates,
+      false
     );
 
     if (
@@ -277,8 +286,11 @@ export function extractEvidence(
         sha256: sha256Base64Url(bytes),
         textPreview: bytes.toString("utf8").slice(0, 240),
         reasons: [candidate.reason],
-        mandatoryInline: true,
-        protectionReasons: ["day1-evidence", candidate.reason]
+        mandatoryInline: candidate.mandatoryInline ?? true,
+        protectionReasons:
+          candidate.mandatoryInline === false
+            ? ["extracted-retrievable-metadata", candidate.reason]
+            : ["day1-evidence", candidate.reason]
       };
     });
 }

@@ -73,7 +73,7 @@ export function buildProtectedRanges(
 
   const nearby = options.nearbySegments ?? 1;
   const ranges: MutableProtectedRange[] = [];
-  for (const item of evidence) {
+  for (const item of evidence.filter((candidate) => candidate.mandatoryInline)) {
     const containingOrdinals = segments
       .filter(
         (segment) =>

@@ -10,8 +10,12 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "check": "npm run typecheck && npm test && npm run build",
+    "demo": "npm run build && node dist\\scripts\\run-demo.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:unit": "vitest run tests/unit",
+    "test:integration": "vitest run tests/integration tests/adversarial tests/crash tests/mutation tests/property"
   },
   "engines": {
     "node": ">=22.13.0"

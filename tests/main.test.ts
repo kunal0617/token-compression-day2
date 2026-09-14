@@ -3,11 +3,11 @@ import { describe, expect, it } from "vitest";
 import { HELP, runCli } from "../src/main.js";
 
 describe("CLI scaffold", () => {
-  it("prints help without side effects", () => {
-    const stdout: string[] = [];
-    const stderr: string[] = [];
+  it("prints help without side effects", async () => {
+    const stdout: (string | Uint8Array)[] = [];
+    const stderr: (string | Uint8Array)[] = [];
 
-    const exitCode = runCli(["--help"], {
+    const exitCode = await runCli(["--help"], {
       stdout: (value) => stdout.push(value),
       stderr: (value) => stderr.push(value)
     });
@@ -17,10 +17,10 @@ describe("CLI scaffold", () => {
     expect(stderr).toEqual([]);
   });
 
-  it("fails explicitly for unknown commands", () => {
-    const stderr: string[] = [];
+  it("fails explicitly for unknown commands", async () => {
+    const stderr: (string | Uint8Array)[] = [];
 
-    const exitCode = runCli(["unexpected"], {
+    const exitCode = await runCli(["unexpected"], {
       stdout: () => undefined,
       stderr: (value) => stderr.push(value)
     });
@@ -29,4 +29,3 @@ describe("CLI scaffold", () => {
     expect(stderr.join("")).toContain("Unknown command: unexpected");
   });
 });
-

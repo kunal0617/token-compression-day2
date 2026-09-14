@@ -1,0 +1,3 @@
+Fix the failing checkout calculation. Preserve the exact assertion, complete
+exception chain, changed source line, command, exit status, and final summary.
+

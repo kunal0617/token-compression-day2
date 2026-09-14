@@ -258,12 +258,37 @@ function proposeScopedBoilerplate(
     scopedBoilerplatePatterns.some((pattern) => pattern.test(line.text))
   );
   if (candidates.length < 3) return [];
-  return candidates.slice(1, -1).map((line) =>
-    proposal(artifact, line, "scoped-boilerplate", 45, 1, {
-      artifactKind: classification.kind,
-      ruleSet: "v1"
-    })
-  );
+  const proposals: TransformProposal[] = [];
+  const middle = candidates.slice(1, -1);
+  let start = 0;
+  while (start < middle.length) {
+    let end = start + 1;
+    while (
+      end < middle.length &&
+      middle[end]?.ordinal === (middle[end - 1]?.ordinal ?? -2) + 1
+    ) {
+      end += 1;
+    }
+    const first = middle[start];
+    const last = middle[end - 1];
+    if (first !== undefined && last !== undefined) {
+      proposals.push(
+        proposal(
+          artifact,
+          { startByte: first.startByte, endByte: last.endByte },
+          "scoped-boilerplate",
+          45,
+          end - start,
+          {
+            artifactKind: classification.kind,
+            ruleSet: "v1"
+          }
+        )
+      );
+    }
+    start = end;
+  }
+  return proposals;
 }
 
 function normalizeVolatileTemplate(text: string): string {
@@ -284,15 +309,16 @@ function normalizeVolatileTemplate(text: string): string {
 
 function safeTemplateCandidate(text: string, outcome: RunOutcome): boolean {
   const isWarning = /^(?:\s*\[[^\]]+\]\s*)?(?:WARN|WARNING)\b/i.test(text);
+  const stableText = normalizeVolatileTemplate(text);
   return (
     /^(?:\s*\[[^\]]+\]\s*)?(?:INFO|WARN|WARNING|DEBUG|PROGRESS)\b/i.test(text) &&
     (!isWarning || outcome === "green") &&
     !/\b(?:error|exception|fail|expected|actual|received|HTTP\s*\d+|test)\b/i.test(
       text
     ) &&
-    !/(?:[A-Za-z]:)?[^ \t\r\n:]+:\d+:\d+/.test(text) &&
-    !/\b(?:v?\d+\.\d+(?:\.\d+)?)\b/.test(text) &&
-    !/[=-](?:--)?[\w-]+/.test(text)
+    !/(?:[A-Za-z]:)?[^ \t\r\n:]+:\d+:\d+/.test(stableText) &&
+    !/\b(?:v?\d+\.\d+(?:\.\d+)?)\b/.test(stableText) &&
+    !/(?:^|\s)(?:--[\w-]+|[\w.-]+=[^\s]+)/.test(stableText)
   );
 }
 
@@ -314,14 +340,35 @@ function proposeVolatileTemplates(
   const proposals: TransformProposal[] = [];
   for (const [template, occurrences] of groups) {
     if (occurrences.length < 4) continue;
-    for (const line of occurrences.slice(1, -1)) {
-      proposals.push(
-        proposal(artifact, line, "volatile-template", 40, 1, {
-          templateSha256: sha256Text(template),
-          totalOccurrences: occurrences.length,
-          approvedMasks: true
-        })
-      );
+    const middle = occurrences.slice(1, -1);
+    let start = 0;
+    while (start < middle.length) {
+      let end = start + 1;
+      while (
+        end < middle.length &&
+        middle[end]?.ordinal === (middle[end - 1]?.ordinal ?? -2) + 1
+      ) {
+        end += 1;
+      }
+      const first = middle[start];
+      const last = middle[end - 1];
+      if (first !== undefined && last !== undefined) {
+        proposals.push(
+          proposal(
+            artifact,
+            { startByte: first.startByte, endByte: last.endByte },
+            "volatile-template",
+            40,
+            end - start,
+            {
+              templateSha256: sha256Text(template),
+              totalOccurrences: occurrences.length,
+              approvedMasks: true
+            }
+          )
+        );
+      }
+      start = end;
     }
   }
   return proposals;

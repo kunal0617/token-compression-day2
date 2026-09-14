@@ -53,14 +53,16 @@ export function buildReceipt(input: {
     originalTokens: input.tokens.originalTokens,
     preparedTokens: input.tokens.preparedTokens,
     tokenReductionPercent,
-    protectedEvidence: input.evidence.map((item) => ({
+    protectedEvidence: input.evidence
+      .filter((item) => item.mandatoryInline)
+      .map((item) => ({
       evidenceId: item.evidenceId,
       occurrenceId: item.occurrenceId,
       kind: item.kind,
       artifactId: item.artifactId,
       startByte: item.startByte,
       endByte: item.endByte
-    })),
+      })),
     transformations,
     handles: input.omissions.map((omission) => omission.handle),
     warnings: input.warnings,
@@ -68,4 +70,3 @@ export function buildReceipt(input: {
     reconstruction: "byte-identical"
   };
 }
-

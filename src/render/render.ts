@@ -110,7 +110,9 @@ export function renderContext(
   }
 
   const preparedBytes = Buffer.concat(chunks);
-  const evidenceMappings = evidence.map((item): EvidenceOutputMapping => {
+  const evidenceMappings = evidence
+    .filter((item) => item.mandatoryInline)
+    .map((item): EvidenceOutputMapping => {
     const literal = mappings.find(
       (mapping) =>
         mapping.kind === "literal" &&
@@ -140,7 +142,7 @@ export function renderContext(
       outputEndByte: outputStartByte + item.endByte - item.startByte,
       sha256: item.sha256
     };
-  });
+    });
 
   return {
     preparedBytes,
@@ -149,4 +151,3 @@ export function renderContext(
     omissions
   };
 }
-

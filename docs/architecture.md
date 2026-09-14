@@ -39,11 +39,12 @@ hashes, slicing, mappings, retrieval, and reconstruction use original bytes.
 | `source` | CQ-05 Tree-sitter units, TypeScript semantic edges, bounded delivery planning, and language fallback | Pure providers |
 | `approval` | CQ-07 captured/current selection, diff3 merge, canonical review subject, and stale approval rejection | Pure state transition |
 | `tui` | Terminal receipt/diff/evidence/gap/retrieval/target review and digest-bound actions | Terminal adapter + pure controller |
-| `adapters/copilot-sdk` | Optional approval-gated empty-mode Copilot session, scoped reads, permissions, events, catalog, and abort | Dynamic SDK adapter |
+| `adapters/copilot-sdk` | Optional approval-gated empty-mode Copilot session, serialized scoped reads, permissions, events, catalog, and abort | Dynamic SDK adapter |
+| `adapters/run-authority` | Reloads committed runs, validates the complete review subject/read scope/evidence completion, and issues opaque persisted send authority | SQLite-backed authority |
 | `model` | MF-01/02/03 hard filters, versioned curated eligibility, deterministic scoring, and new-session advice | Pure provider |
 | `helper` | Optional additive-only gap/query suggestions with strict schemas, budgets, isolation, and no-op failures | Isolated transport adapters |
 | `security` | Trust classes, local secret/injection assessment, shareable redaction, and external-send authorization | Pure policy + crypto |
-| `evaluation` | Opt-in matched A/B trials, replay manifests, scoring, statistics, reports, and external adapters | Evaluation ports + process adapter |
+| `evaluation` | Opt-in matched A/B trials, artifact/executable-bound replay manifests, scoring, statistics, reports, and safe external adapters | Evaluation ports + read-only/manual or explicit process adapter |
 | `scripts/day0-5-demo` | Integrated offline preparation-to-evaluation bundle | Reproducible demo adapter |
 | `segment` / `protect` | Structural lines and protected closure | Pure |
 | `reduce` | Proposals, benefit checks, and overlap resolution | Pure |
@@ -73,8 +74,15 @@ hashes, slicing, mappings, retrieval, and reconstruction use original bytes.
 When an older database first receives the `receipt_hash` column, only receipts
 that pass schema, canonical-form, and run-ID checks are backfilled. Corrupt
 historical receipts fail explicitly.
-5. Any validation failure changes only that staging run to `failed`. A staging
+6. Any validation failure changes only that staging run to `failed`. A staging
    crash remains invisible to public reads.
+
+Gathered evidence is stored as adapter-bound facts. When the validated fact set
+satisfies every required obligation, SQLite records a separate immutable
+completion digest without rewriting the canonical run manifest. Review
+approval then stores an opaque random capability bound to the complete subject,
+payload, read scope, and fact set. The Copilot adapter accepts no caller-minted
+self-hash in place of that committed authority.
 
 ## Determinism
 
@@ -92,13 +100,17 @@ adapters, and evaluation adapters share immutable producer metadata:
 contract/rule set. Detectors emit findings only; the deterministic policy layer
 turns reduction findings into a final non-overlapping plan.
 
-New runs use manifest format v2 and persist only the sorted producers that
+New runs use manifest format v3 and persist only the sorted producers that
 actually participated in preparation, both in the canonical manifest and
 `run_producers`. Metadata is snapshotted, validated, and frozen on registration;
 ordering uses UTF-8 binary comparison to match SQLite `BINARY`. Historical
 producers resolve by `(producerId, version, digest)`, so unrelated registry
 growth cannot invalidate an old run. Legacy v1 runs contain no producer
 registry and remain supported without fabricating metadata.
+
+A genuine SQLite fixture produced by the original v1 implementation verifies
+the historical schema, long-form omission marker, receipt normalization,
+handle retrieval, and reconstruction path.
 
 Outcomes are computed per context artifact. Red wins the aggregate receipt;
 green plus unknown aggregates to unknown, and green-only reduction rules apply

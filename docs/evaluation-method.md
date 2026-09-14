@@ -4,7 +4,9 @@
 
 Evaluation is replay-first and live runs are opt-in. A versioned manifest binds
 the suite, cases, seed, settings, permissions, adapter, trial count, and
-original/prepared/truncation arms.
+original/prepared/truncation arms. Every artifact path is paired with its exact
+byte length and SHA-256. Every plan also binds the expected evaluator executable
+and protocol digests.
 
 The default paired design is:
 
@@ -15,6 +17,10 @@ The default paired design is:
 Each A/B trial pair has the same model, reasoning/context settings, permission
 digest, adapter, and session-constraint digest. Observations that violate those
 constraints fail rather than entering the report.
+Artifacts are re-read and rehashed immediately before each trial. Explicit
+external command adapters rehash their executable immediately before launch;
+the default external-manual adapter launches no process and performs
+root-confined direct reads only.
 
 ## Measures
 
@@ -41,3 +47,12 @@ manifest. The seed makes bootstrap results deterministic.
 Live execution is rejected unless `liveOptIn` is true. This prevents an
 evaluation definition from silently issuing model calls.
 
+The manual CQ/MF/Luna comparison is separate from live paired model scoring:
+
+```shell
+npm run parity:external -- --root <external-manual-root>
+```
+
+Its ignored local report contains case IDs, pass/fail/not-applicable status,
+metrics, reasons, and digests only. Private fixture content is never copied or
+reported.

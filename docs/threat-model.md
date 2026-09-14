@@ -27,7 +27,9 @@
   previews, never the secret value.
 - External live send is blocked by default. A separately hashed authorization
   must bind the exact payload and security assessment. The Copilot adapter also
-  requires network permission in the approval envelope.
+  requires network permission in the approval envelope and conservatively
+  assesses the exact outbound bytes as external-untrusted; callers cannot
+  downgrade that classification.
 - Blocking secret findings require a separately hashed source-linked redacted
   view. Placeholders are random or keyed HMAC; unsalted hashes of low-entropy
   secrets are prohibited.
@@ -35,7 +37,17 @@
   be removed or explicitly resolved by a higher-level review.
 - The optional Copilot SDK runs in empty mode with only run-scoped
   `evidence_read` and `source_read`. Cross-run and unapproved ranges fail.
-  Write, shell, and network permission are separate.
+  Tool results are rescanned before model exposure. Write, shell, and network
+  permission are separate.
+- A committed-run authority reloads the run and binds payload role/bytes,
+  source identities, policy/detector/tokenizer metadata, exact review producer
+  set, read scope, and completed evidence obligations. It issues an opaque
+  random capability persisted in SQLite; self-calculated approval hashes alone
+  cannot authorize a send.
+- SDK operations are serialized so cached-session sends, event subscriptions,
+  and permission/scope reconfiguration cannot overlap.
+- Hosted evidence helpers must attest the enforced empty-mode client
+  configuration and isolated working/base directory before a session starts.
 - Application timeout calls `session.abort()`; stopping the wait is not treated
   as cancellation.
 - Context Overflow emits no content telemetry by default.
@@ -50,4 +62,3 @@
 - Local compromise with arbitrary process/database access is outside the
   confidentiality boundary, but stored corruption is expected to fail
   integrity validation.
-

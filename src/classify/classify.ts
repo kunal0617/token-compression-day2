@@ -5,6 +5,10 @@ import type {
   IntentKind,
   RunOutcome
 } from "../contracts/types.js";
+import {
+  analyzeCiLines,
+  isRecognizedCiArtifact
+} from "../ci/envelope.js";
 
 function includesAny(text: string, patterns: readonly RegExp[]): boolean {
   return patterns.some((pattern) => pattern.test(text));
@@ -163,6 +167,22 @@ export function determineOutcome(
     .filter((artifact) => artifact.role === "context")
     .map((artifact) => artifact.bytes.toString("utf8"))
     .join("\n");
+  const recognizedCi = artifacts.some((artifact) =>
+    isRecognizedCiArtifact(analyzeCiLines(artifact))
+  );
+
+  if (
+    recognizedCi &&
+    (/"(?:conclusion|result)"\s*:\s*"(?:failure|failed|cancelled|timed_out|action_required)"/i.test(
+      text
+    ) ||
+      /\bscript_conclusion\s*:\s*(?:failure|failed|cancelled|timed_out)\b/i.test(
+        text
+      ) ||
+      /\bfailed_count\s*:\s*[1-9]\d*\b/i.test(text))
+  ) {
+    return "red";
+  }
 
   const exitCodes = [
     ...text.matchAll(
@@ -175,6 +195,13 @@ export function determineOutcome(
   }
 
   if (
+    /"(?:conclusion|result)"\s*:\s*"(?:failure|failed|cancelled|timed_out|action_required)"/i.test(
+      text
+    ) ||
+    /\bscript_conclusion\s*:\s*(?:failure|failed|cancelled|timed_out)\b/i.test(
+      text
+    ) ||
+    /\bfailed_count\s*:\s*[1-9]\d*\b/i.test(text) ||
     /\b(?:tests?|suites?)\s+(?:failed|failing)\b/i.test(text) ||
     /\b(?:FAIL|FAILED)\b[\s\S]{0,120}\b(?:tests?|suites?)\b/i.test(text) ||
     /\bBuild failed\b/i.test(text)
@@ -182,6 +209,7 @@ export function determineOutcome(
     return "red";
   }
   if (
+    /"(?:conclusion|result)"\s*:\s*"success"/i.test(text) ||
     /\b(?:tests?|suites?)\s+passed\b/i.test(text) ||
     /\bBuild succeeded\b/i.test(text) ||
     /\bAll tests passed\b/i.test(text)
@@ -199,4 +227,3 @@ export function determineOutcome(
   if (/\b(?:passed|success|green|ok)\b/i.test(finalSummary)) return "green";
   return "unknown";
 }
-

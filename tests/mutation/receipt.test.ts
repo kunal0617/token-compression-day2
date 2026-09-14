@@ -6,6 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 
 import type { ContextReceipt } from "../../src/contracts/types.js";
+import { canonicalJson } from "../../src/core/canonical.js";
 import { prepareContext } from "../../src/pipeline/prepare.js";
 import { ContextStore } from "../../src/storage/store.js";
 import { verifyStoredRun } from "../../src/validate/validate.js";
@@ -186,9 +187,23 @@ describe("receipt binding", () => {
       expect(prepared.ok).toBe(true);
       if (!prepared.ok) return;
       const database = new DatabaseSync(storePath);
+      const receiptRow = database
+        .prepare("SELECT receipt_json FROM runs WHERE run_id=?")
+        .get(prepared.value.package.runId) as
+        | { receipt_json: string }
+        | undefined;
+      expect(receiptRow).toBeDefined();
+      if (receiptRow === undefined) throw new Error("Receipt was not found");
+      const legacyReceipt = JSON.parse(receiptRow.receipt_json) as {
+        transformations: Record<string, number>;
+      };
+      delete legacyReceipt.transformations["ci-wrapper"];
+      const legacyJson = canonicalJson(legacyReceipt);
       database
-        .prepare("UPDATE runs SET receipt_hash=NULL WHERE run_id=?")
-        .run(prepared.value.package.runId);
+        .prepare(
+          "UPDATE runs SET receipt_json=?, receipt_hash=NULL WHERE run_id=?"
+        )
+        .run(legacyJson, prepared.value.package.runId);
       database.close();
 
       const migrated = new ContextStore(storePath);

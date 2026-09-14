@@ -84,4 +84,18 @@ describe("deterministic classification and outcome precedence", () => {
       )
     ).toBe(false);
   });
+
+  it("lets failed CI job conclusions override a successful wrapper exit", () => {
+    const log = artifact(
+      [
+        "2031-04-05T10:00:00.0000000Z ##[group]Jobs Output",
+        '2031-04-05T10:00:00.0100000Z \"conclusion\": \"failure\"',
+        '2031-04-05T10:00:00.0200000Z \"name\": \"test (demo)\"',
+        "2031-04-05T10:00:00.0300000Z ##[endgroup]",
+        "2031-04-05T10:00:00.0400000Z Process exited with code 0",
+        ""
+      ].join("\n")
+    );
+    expect(determineOutcome([log])).toBe("red");
+  });
 });

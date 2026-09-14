@@ -8,6 +8,7 @@ typed non-success result; no compressed success object is emitted.
 | Artifact authority | Stored and in-memory byte lengths and full SHA-256 base64url digests match |
 | Staged authority | Publication validates artifact metadata and blobs reloaded from staged SQLite rows under the write lock |
 | Evidence identity | Evidence and occurrence IDs are unique; ranges and hashes match exact source bytes |
+| Analysis/source separation | CI envelope normalization never changes source bytes, byte coordinates, output mappings, or reconstruction |
 | Protected closure | Protected ranges are bounded, reference real evidence, and do not intersect transforms or omissions |
 | Plan | Transforms are ordered, non-overlapping, benefit-positive, and 1:1 with omissions |
 | Handles | Version, algorithm, full digest, byte length, and occurrence ID parse strictly |

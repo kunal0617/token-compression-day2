@@ -5,6 +5,7 @@ import {
   classifyIntent,
   determineOutcome
 } from "../classify/classify.js";
+import { detectMissingCiFailureEvidence } from "../ci/envelope.js";
 import type {
   ArtifactManifest,
   ArtifactSnapshot,
@@ -152,6 +153,8 @@ export async function prepareContext(input: PrepareInput): Promise<PrepareResult
       (item) => item.artifactId === artifact.artifactId
     );
     const segments = segmentArtifact(artifact);
+    const missingCiEvidence = detectMissingCiFailureEvidence(artifact);
+    if (missingCiEvidence !== undefined) warnings.push(missingCiEvidence);
     const protection = buildProtectedRanges(
       artifact,
       artifactEvidence,

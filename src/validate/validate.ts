@@ -580,7 +580,7 @@ export function validateContextPackage(input: {
       });
     }
     const markerPattern =
-      /^\[CTXO OMIT reason=([^ ]+) count=(\d+) bytes=(\d+) handle=([^\]]+)\]\n$/;
+      /^\[CTXO OMIT r=([^ ]+) c=(\d+) b=(\d+) h=([^\]]+)\]\n$/;
     const markerMatch = markerPattern.exec(omission.marker);
     if (
       markerMatch?.[1] !== omission.reason ||

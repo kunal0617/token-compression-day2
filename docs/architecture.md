@@ -31,6 +31,7 @@ hashes, slicing, mappings, retrieval, and reconstruction use original bytes.
 | `intake` | Raw-byte capture, canonical paths, UTF-8 and metadata | Filesystem adapter |
 | `classify` | Deterministic artifact, intent, and artifact-local outcome reasons | Pure |
 | `evidence` | Exact occurrence extraction and hashes | Pure |
+| `ci` | Analysis-only timestamp/ANSI envelopes, CI criticality, and missing-evidence detection | Pure |
 | `segment` / `protect` | Structural lines and protected closure | Pure |
 | `reduce` | Proposals, benefit checks, and overlap resolution | Pure |
 | `render` | One compact render and mapping creation | Pure |
@@ -72,3 +73,12 @@ expected to have the same digest even when the deterministic plan is equal.
 Outcomes are computed per context artifact. Red wins the aggregate receipt;
 green plus unknown aggregates to unknown, and green-only reduction rules apply
 only to the artifact whose own authoritative outcome is green.
+
+Recognized CI logs receive a separate analysis view. A leading BOM/ISO
+timestamp and ANSI SGR wrappers are excluded from signatures and parser
+matching only; source byte coordinates and all retained/omitted bytes are
+unchanged. CI group proposals keep directive titles and critical lines literal
+while placing only explicitly allowlisted runner/setup/JSON/shell wrapper
+records behind ordinary content-addressed handles. CI mode requires at least
+three envelopes, at least 40% envelope coverage, and balanced directive
+evidence; a few timestamped lines cannot opt an arbitrary log into CI folding.

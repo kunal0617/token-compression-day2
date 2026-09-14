@@ -14,7 +14,8 @@ const transformReasons: readonly TransformReason[] = [
   "exact-nonconsecutive-repetition",
   "success-chatter",
   "scoped-boilerplate",
-  "volatile-template"
+  "volatile-template",
+  "ci-wrapper"
 ];
 
 export function buildReceipt(input: {

@@ -82,6 +82,7 @@ const evidenceSchema = byteRangeSchema
       "timestamp",
       "final-summary",
       "correlation-id",
+      "ci-critical",
       "unknown-diagnostic"
     ]),
     sha256: sha256Base64UrlSchema,
@@ -105,7 +106,8 @@ const transformReasonSchema = z.enum([
   "exact-nonconsecutive-repetition",
   "success-chatter",
   "scoped-boilerplate",
-  "volatile-template"
+  "volatile-template",
+  "ci-wrapper"
 ]);
 
 const plannedTransformSchema = byteRangeSchema
@@ -256,6 +258,7 @@ export const contextReceiptSchema = z
             "timestamp",
             "final-summary",
             "correlation-id",
+            "ci-critical",
             "unknown-diagnostic"
           ]),
           artifactId: z.string().min(1),
@@ -270,7 +273,8 @@ export const contextReceiptSchema = z
         "exact-nonconsecutive-repetition": z.number().int().nonnegative(),
         "success-chatter": z.number().int().nonnegative(),
         "scoped-boilerplate": z.number().int().nonnegative(),
-        "volatile-template": z.number().int().nonnegative()
+        "volatile-template": z.number().int().nonnegative(),
+        "ci-wrapper": z.number().int().nonnegative().optional()
       })
       .strict(),
     handles: z.array(z.string().min(1)),

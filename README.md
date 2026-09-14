@@ -31,6 +31,14 @@ provider. Its provider-neutral handoff port accepts only a
   `o200k_base` tokens before a package becomes ready.
 - Outcomes are artifact-local: red wins the aggregate receipt, while an
   unrelated green artifact cannot authorize warning folding in an unknown one.
+- GitHub Actions/Azure-style timestamp and ANSI envelopes are stripped only in
+  the analysis view. Original bytes remain the hashing, rendering, retrieval,
+  and reconstruction authority.
+- Recognized CI wrapper groups, repeated setup metadata, echoed shell
+  scaffolding, and stable envelope-only repetitions can fold behind handles.
+  Failure conclusions, job/workflow/run/branch/image facts, zero-artifact
+  observations, metrics, actual warnings/errors, and chronology remain
+  protected.
 - Validated output paths are checked against the store, WAL/SHM sidecars, and
   canonical file identity before any write. Final symlinks are rejected and
   output is created exclusively without following an existing path.
@@ -79,6 +87,28 @@ Red and unknown outcomes preserve warning templates. Error codes, HTTP codes,
 exception types, test names, expected/actual values, source locations,
 versions, configuration keys, and command arguments are never broadly masked.
 All folded originals remain retrievable.
+
+For CI summary logs, routine path/version/timestamp/identifier occurrences stay
+in the manifest but do not automatically protect neighboring lines. Source
+locations require credible file extensions or diagnostic/stack/compiler
+context, preventing ISO timestamps and clocks from being misclassified as
+`file:line:column`. When a wrapper log reports a failed child job but lacks that
+job's detailed log, the receipt explicitly warns that root-cause evidence is
+missing.
+
+### CI regression measurement
+
+A 520-line real GitHub Actions metrics-wrapper log was evaluated locally and
+was not added to this repository. Before the CI-aware changes it produced no
+reduction: 16,320 → 16,320 actual tokens, 668 mandatory evidence spans, and no
+handles. The safety-reviewed final result is 16,320 → 10,486 actual tokens
+(**35.75%**), 77 mandatory evidence spans, and 41 retrievable handles, with integrity verified
+and byte-identical reconstruction. The failing lane/setup conclusion,
+workflow/run/branch/image identifiers, zero-artifact observation, metrics,
+deprecation warning, and chronology remained literal.
+
+`fixtures/github-actions-metrics-synthetic.log` is a sanitized, invented
+equivalent used by the public regression suite.
 
 ## Development
 

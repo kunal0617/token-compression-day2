@@ -36,7 +36,7 @@ describe("deterministic reduction planning", () => {
     expect(first.selected).toEqual(second.selected);
     expect(first.selected.length).toBeGreaterThan(0);
     expect(first.selected[0]?.handle).toMatch(
-      /^ctxo:v1:sha256:[A-Za-z0-9_-]{43}:\d+:omission-[A-Za-z0-9_-]{43}$/
+      /^ctxo:v1:sha256:[A-Za-z0-9_-]{43}:\d+:[A-Za-z0-9._-]+$/
     );
   });
 
@@ -239,5 +239,97 @@ describe("deterministic reduction planning", () => {
         .every((segment) => segment.kind === "diff")
     ).toBe(true);
     expect(plan.selected).toEqual([]);
+  });
+
+  it("does not fold arbitrary differing CI group content", () => {
+    const artifact = snapshotBytes(
+      Buffer.from(
+        [
+          "2031-04-05T10:00:00.0000000Z ##[group]Unknown state feed",
+          ...Array.from(
+            { length: 20 },
+            (_, index) =>
+              `2031-04-05T10:00:${String(index + 1).padStart(2, "0")}.0000000Z state=${
+                index === 10 ? "failed" : "queued"
+              } id=item-${index} error=detail-${index}`
+          ),
+          "2031-04-05T10:01:00.0000000Z ##[endgroup]",
+          ""
+        ].join("\n"),
+        "utf8"
+      ),
+      {
+        ordinal: 1,
+        role: "context",
+        kind: "pasted",
+        label: "unsafe-ci-group.log"
+      }
+    );
+    const proposals = proposeTransforms(
+      artifact,
+      classifyArtifact(artifact),
+      "red"
+    );
+    expect(
+      proposals.some((proposal) => proposal.reason === "ci-wrapper")
+    ).toBe(false);
+  });
+
+  it("does not treat unknown runner state or build IDs as wrapper metadata", () => {
+    const artifact = snapshotBytes(
+      Buffer.from(
+        [
+          "2031-04-05T10:00:00.0000000Z ##[group]Runner Image Provisioner",
+          "2031-04-05T10:00:00.0100000Z state=queued build_id=alpha",
+          "2031-04-05T10:00:00.0200000Z state=running build_id=beta",
+          "2031-04-05T10:00:00.0300000Z state=ready build_id=gamma",
+          "2031-04-05T10:00:00.0400000Z ##[endgroup]",
+          ""
+        ].join("\n"),
+        "utf8"
+      ),
+      {
+        ordinal: 1,
+        role: "context",
+        kind: "pasted",
+        label: "runner-state.log"
+      }
+    );
+    expect(
+      proposeTransforms(
+        artifact,
+        classifyArtifact(artifact),
+        "unknown"
+      ).some((proposal) => proposal.reason === "ci-wrapper")
+    ).toBe(false);
+  });
+
+  it("does not fold ANSI-wrapped unknown fields inside Run groups", () => {
+    const artifact = snapshotBytes(
+      Buffer.from(
+        [
+          "2031-04-05T10:00:00.0000000Z ##[group]Run unknown-state script",
+          "2031-04-05T10:00:00.0100000Z \u001b[36;1mstate=queued\u001b[0m",
+          "2031-04-05T10:00:00.0200000Z \u001b[36;1mbuild_id=alpha\u001b[0m",
+          "2031-04-05T10:00:00.0300000Z \u001b[36;1mstate=running\u001b[0m",
+          "2031-04-05T10:00:00.0400000Z ##[endgroup]",
+          ""
+        ].join("\n"),
+        "utf8"
+      ),
+      {
+        ordinal: 1,
+        role: "context",
+        kind: "pasted",
+        label: "ansi-unknown-state.log"
+      }
+    );
+    expect(
+      proposeTransforms(
+        artifact,
+        classifyArtifact(artifact),
+        "unknown"
+      ).some((proposal) => proposal.reason === "ci-wrapper")
+    ).toBe(false);
   });
 });

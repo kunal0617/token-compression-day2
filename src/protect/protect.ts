@@ -82,16 +82,17 @@ export function buildProtectedRanges(
     });
   }
   for (const item of evidence.filter((candidate) => candidate.mandatoryInline)) {
+    const itemNearby = item.kind === "ci-critical" ? 0 : nearby;
     const containingOrdinals = segments
       .filter(
         (segment) =>
           segment.startByte < item.endByte && item.startByte < segment.endByte
       )
       .map((segment) => segment.ordinal);
-    const first = Math.max(0, Math.min(...containingOrdinals) - nearby);
+    const first = Math.max(0, Math.min(...containingOrdinals) - itemNearby);
     const last = Math.min(
       Math.max(0, segments.length - 1),
-      Math.max(...containingOrdinals) + nearby
+      Math.max(...containingOrdinals) + itemNearby
     );
     const firstSegment = segments[first];
     const lastSegment = segments[last];

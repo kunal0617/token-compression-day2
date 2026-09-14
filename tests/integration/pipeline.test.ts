@@ -142,4 +142,34 @@ describe("end-to-end offline pipeline", () => {
       rmSync(directory, { recursive: true, force: true });
     }
   });
+
+  it("keeps omission occurrence IDs unique across multiple artifacts", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "ctxo-multi-artifact-"));
+    const storePath = join(directory, "context.sqlite");
+    try {
+      const result = await prepareContext({
+        promptText: "Inspect both traces.",
+        contextTexts: [
+          {
+            label: "first.log",
+            text: "long repeated first artifact payload\n".repeat(100)
+          },
+          {
+            label: "second.log",
+            text: "long repeated second artifact payload\n".repeat(100)
+          }
+        ],
+        storePath
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const occurrences = result.value.package.manifest.omissions.map(
+        (omission) => omission.occurrenceId
+      );
+      expect(occurrences.length).toBeGreaterThanOrEqual(2);
+      expect(new Set(occurrences).size).toBe(occurrences.length);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
 });

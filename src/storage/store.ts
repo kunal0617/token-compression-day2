@@ -274,7 +274,7 @@ export class ContextStore {
         if (
           !parsed.success ||
           parsed.data.runId !== row.run_id ||
-          canonicalJson(parsed.data) !== row.receipt_json
+          canonicalJson(parsedJson) !== row.receipt_json
         ) {
           throw new Error(
             `Historical receipt cannot be safely backfilled for run ${row.run_id}`
@@ -1115,7 +1115,7 @@ export class ContextStore {
           issues: parsed.error.issues.map((issue) => issue.message)
         });
       }
-      if (canonicalJson(parsed.data) !== row.receipt_json) {
+      if (canonicalJson(parsedJson) !== row.receipt_json) {
         return failure("INTEGRITY_ERROR", "Stored receipt is not canonical", {
           runId
         });
@@ -1129,7 +1129,13 @@ export class ContextStore {
           runId
         });
       }
-      return success(parsed.data as ContextReceipt);
+      return success({
+        ...parsed.data,
+        transformations: {
+          ...parsed.data.transformations,
+          "ci-wrapper": parsed.data.transformations["ci-wrapper"] ?? 0
+        }
+      } as ContextReceipt);
     } catch (error) {
       return failure("STORAGE_ERROR", "Unable to inspect receipt", {
         runId,

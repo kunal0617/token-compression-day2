@@ -85,6 +85,7 @@ export type EvidenceKind =
   | "timestamp"
   | "final-summary"
   | "correlation-id"
+  | "ci-critical"
   | "unknown-diagnostic";
 
 export interface EvidenceSpan extends ByteRange {
@@ -132,7 +133,8 @@ export type TransformReason =
   | "exact-nonconsecutive-repetition"
   | "success-chatter"
   | "scoped-boilerplate"
-  | "volatile-template";
+  | "volatile-template"
+  | "ci-wrapper";
 
 export interface TransformProposal extends ByteRange {
   readonly proposalId: string;

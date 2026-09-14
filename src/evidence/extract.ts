@@ -6,13 +6,32 @@ import type {
   EvidenceSpan,
   RunOutcome
 } from "../contracts/types.js";
+import {
+  analyzeCiLines,
+  ciCriticalOrdinalsToKeep,
+  isCiActualDiagnosticContent,
+  isCiCriticalLine,
+  isRecognizedCiArtifact,
+  isRoutineCiDeprecation
+} from "../ci/envelope.js";
 import { sha256Base64Url, sha256Text } from "../core/hash.js";
-import { splitRawLines, type LineRecord } from "../segment/segment.js";
+import {
+  segmentArtifact,
+  splitRawLines,
+  type LineRecord
+} from "../segment/segment.js";
 
 interface EvidenceCandidate extends ByteRange {
   readonly kind: EvidenceKind;
   readonly reason: string;
   readonly mandatoryInline?: boolean;
+}
+
+function isFailingTestText(text: string): boolean {
+  return (
+    /^(?:FAIL(?:ED)?\b|not ok\b|[✗×]\s)/i.test(text.trim()) ||
+    /\b(?:tests?|suites?)\s+(?:failed|failing)\b/i.test(text)
+  );
 }
 
 function blockRange(
@@ -51,11 +70,13 @@ function addMatchCandidates(
   kind: EvidenceKind,
   reason: string,
   candidates: EvidenceCandidate[],
-  mandatoryInline = true
+  mandatoryInline = true,
+  accept: (match: RegExpExecArray) => boolean = () => true
 ): void {
   const flags = pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`;
   const globalPattern = new RegExp(pattern.source, flags);
   for (const match of line.text.matchAll(globalPattern)) {
+    if (!accept(match)) continue;
     candidates.push({
       ...matchRange(line, match),
       kind,
@@ -70,11 +91,27 @@ export function extractEvidence(
   classification: ArtifactClassification,
   outcome: RunOutcome
 ): EvidenceSpan[] {
-  const lines = splitRawLines(artifact.bytes);
+  const analyses = analyzeCiLines(artifact);
+  const lines = analyses.map((analysis) => analysis.line);
+  const ciArtifact = isRecognizedCiArtifact(analyses);
+  const retainedCiCritical = ciCriticalOrdinalsToKeep(analyses);
+  const segments = segmentArtifact(artifact);
   const candidates: EvidenceCandidate[] = [];
 
-  for (const line of lines) {
-    const trimmed = line.text.trim();
+  for (const analysis of analyses) {
+    const { line } = analysis;
+    const text = analysis.content;
+    const trimmed = text.trim();
+    const segmentKind = segments[line.ordinal]?.kind ?? "text";
+    const diagnosticContext =
+      (ciArtifact
+        ? ["command", "diff", "stack"].includes(segmentKind) ||
+          isCiActualDiagnosticContent(text)
+        : ["command", "diagnostic", "diff", "stack", "summary"].includes(
+            segmentKind
+          )          ) ||
+          isFailingTestText(text) ||
+          /\b(?:AssertionError|expected|received|actual)\b/i.test(text);
     if (/^(?:\$|>|PS .+>|command:|run:)\s/i.test(trimmed)) {
       candidates.push({
         startByte: line.startByte,
@@ -85,7 +122,7 @@ export function extractEvidence(
     }
     if (
       /\b(?:exit code|process exited with code)\s*[:=]?\s*-?\d+\b/i.test(
-        line.text
+        text
       )
     ) {
       candidates.push({
@@ -95,7 +132,10 @@ export function extractEvidence(
         reason: "Structured process exit code"
       });
     }
-    if (/\b(?:FAIL(?:ED)?|not ok|✗|×)\b/i.test(line.text)) {
+    if (
+      isFailingTestText(text) &&
+      (!ciArtifact || !analysis.hadAnsi || isCiActualDiagnosticContent(text))
+    ) {
       candidates.push({
         startByte: line.startByte,
         endByte: line.endByte,
@@ -103,14 +143,16 @@ export function extractEvidence(
         reason: "Failing test marker"
       });
     }
-    if (/\b(?:AssertionError|expected|received|actual)\b/i.test(line.text)) {
+    if (/\b(?:AssertionError|expected|received|actual)\b/i.test(text)) {
       const range = blockRange(
         lines,
         line.ordinal,
         (next, distance) =>
           distance <= 8 &&
-          (next.text.trim().length > 0 ||
-            /^\s+(?:at|expected|actual|received|[+-])/i.test(next.text)),
+          ((analyses[next.ordinal]?.content ?? next.text).trim().length > 0 ||
+            /^\s+(?:at|expected|actual|received|[+-])/i.test(
+              analyses[next.ordinal]?.content ?? next.text
+            )),
         12
       );
       candidates.push({
@@ -119,7 +161,7 @@ export function extractEvidence(
         reason: "Complete assertion context"
       });
     }
-    if (/^\s*(?:Expected|expected)\b/i.test(line.text)) {
+    if (/^\s*(?:Expected|expected)\b/i.test(text)) {
       candidates.push({
         startByte: line.startByte,
         endByte: line.endByte,
@@ -127,7 +169,7 @@ export function extractEvidence(
         reason: "Assertion expected value"
       });
     }
-    if (/^\s*(?:Actual|actual|Received|received)\b/i.test(line.text)) {
+    if (/^\s*(?:Actual|actual|Received|received)\b/i.test(text)) {
       candidates.push({
         startByte: line.startByte,
         endByte: line.endByte,
@@ -137,7 +179,7 @@ export function extractEvidence(
     }
     if (
       /(?:^|\s)(?:Caused by:\s*)?(?:[A-Za-z_$][\w.$]*(?:Error|Exception|Failure)|Error|Exception|Failure):/.test(
-        line.text
+        text
       )
     ) {
       const range = blockRange(
@@ -145,10 +187,16 @@ export function extractEvidence(
         line.ordinal,
         (next, distance) =>
           distance <= 40 &&
-          (/^\s+(?:at|\.{3}\s+\d+\s+more)/.test(next.text) ||
-            /^\s*Caused by:/.test(next.text) ||
-            /(?:Error|Exception|Failure):/.test(next.text) ||
-            next.text.trim().length === 0),
+          (/^\s+(?:at|\.{3}\s+\d+\s+more)/.test(
+            analyses[next.ordinal]?.content ?? next.text
+          ) ||
+            /^\s*Caused by:/.test(
+              analyses[next.ordinal]?.content ?? next.text
+            ) ||
+            /(?:Error|Exception|Failure):/.test(
+              analyses[next.ordinal]?.content ?? next.text
+            ) ||
+            (analyses[next.ordinal]?.content ?? next.text).trim().length === 0),
         48
       );
       candidates.push({
@@ -163,7 +211,7 @@ export function extractEvidence(
         reason: "Exception message"
       });
     }
-    if (/^\s*at\s+.+(?::\d+:\d+|\(.*:\d+:\d+\))/.test(line.text)) {
+    if (/^\s*at\s+.+(?::\d+:\d+|\(.*:\d+:\d+\))/.test(text)) {
       candidates.push({
         startByte: line.startByte,
         endByte: line.endByte,
@@ -173,9 +221,9 @@ export function extractEvidence(
     }
     if (
       /(?:^|\s)(?:[A-Za-z]:)?[^:\r\n]+:\d+:\d+:\s*(?:error|warning)\b/i.test(
-        line.text
+        text
       ) ||
-      /\berror TS\d+\b/i.test(line.text)
+      /\berror TS\d+\b/i.test(text)
     ) {
       candidates.push({
         startByte: line.startByte,
@@ -190,14 +238,27 @@ export function extractEvidence(
       /(?:[A-Za-z]:)?(?:[\w.-]+[\\/])+[\w.-]+(?::\d+(?::\d+)?)?/,
       "path",
       "Path or source location",
-      candidates
+      candidates,
+      diagnosticContext
     );
     addMatchCandidates(
       line,
-      /\b(?:[A-Za-z]:)?[^ \t\r\n:]+:\d+:\d+\b/,
+      /\b(?:[A-Za-z]:)?(?:[\w@+.-]+[\\/])*[\w@+.-]+\.(?:[cm]?[jt]sx?|py|rb|go|rs|java|cs|cpp|cc|c|h|hpp|swift|kt|kts|scala|sh|ps1|ya?ml|json|toml|xml|sql|md):\d+(?::\d+)?\b/i,
       "source-location",
       "Source line and column",
-      candidates
+      candidates,
+      diagnosticContext,
+      (match) => {
+        const prefix = line.text.slice(0, match.index);
+        const tokenPrefix = prefix.slice(
+          Math.max(
+            prefix.lastIndexOf(" "),
+            prefix.lastIndexOf("\t"),
+            prefix.lastIndexOf("\"")
+          ) + 1
+        );
+        return !tokenPrefix.includes("://");
+      }
     );
     addMatchCandidates(
       line,
@@ -211,7 +272,8 @@ export function extractEvidence(
       /\b(?:v?\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?)\b/,
       "version",
       "Version",
-      candidates
+      candidates,
+      false
     );
     addMatchCandidates(
       line,
@@ -231,9 +293,9 @@ export function extractEvidence(
     );
 
     if (
-      /\b(?:tests?|suites?)\s+(?:passed|failed|failing)\b/i.test(line.text) ||
-      /\b(?:Build|Compilation)\s+(?:succeeded|failed)\b/i.test(line.text) ||
-      /\b(?:summary|result|status)\b\s*[:=-]/i.test(line.text)
+      /\b(?:tests?|suites?)\s+(?:passed|failed|failing)\b/i.test(text) ||
+      /\b(?:Build|Compilation)\s+(?:succeeded|failed)\b/i.test(text) ||
+      /^\s*(?:summary|result|status)\s*[:=]/i.test(text)
     ) {
       candidates.push({
         startByte: line.startByte,
@@ -243,12 +305,32 @@ export function extractEvidence(
       });
     }
 
+    if (ciArtifact && isCiCriticalLine(analysis)) {
+      candidates.push({
+        startByte: line.startByte,
+        endByte: line.endByte,
+        kind: "ci-critical",
+        reason: "CI job, outcome, run, branch, image, artifact, or metrics evidence",
+        mandatoryInline: retainedCiCritical.has(line.ordinal)
+      });
+    } else if (ciArtifact && isRoutineCiDeprecation(text)) {
+      candidates.push({
+        startByte: line.startByte,
+        endByte: line.endByte,
+        kind: "unknown-diagnostic",
+        reason: "Retrievable repeated CI deprecation metadata",
+        mandatoryInline: false
+      });
+    }
+
     if (
       outcome !== "green" &&
       ["test-log", "compiler-diagnostics", "stack-trace", "generic-log"].includes(
         classification.kind
       ) &&
-      /\b(?:error|fail|fatal|panic|unknown)\b/i.test(line.text)
+      (ciArtifact
+        ? isCiActualDiagnosticContent(text)
+        : /\b(?:error|fail|fatal|panic|unknown)\b/i.test(text))
     ) {
       candidates.push({
         startByte: line.startByte,

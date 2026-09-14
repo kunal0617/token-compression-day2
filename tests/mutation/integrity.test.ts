@@ -302,7 +302,7 @@ describe("fail-closed mutations", () => {
         const omission = manifest.omissions[0];
         const transform = manifest.transforms[0];
         if (omission === undefined || transform === undefined) return manifest;
-        const marker = omission.marker.replace("reason=", "reason=x");
+        const marker = omission.marker.replace("r=", "r=x");
         return {
           ...manifest,
           omissions: [

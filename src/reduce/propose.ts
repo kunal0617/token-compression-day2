@@ -5,6 +5,14 @@ import type {
   TransformProposal,
   TransformReason
 } from "../contracts/types.js";
+import {
+  analyzeCiLines,
+  ciCriticalOrdinalsToKeep,
+  isAllowedCiGroupBodyLine,
+  isRecognizedCiArtifact,
+  isCiRoutineWrapperContent,
+  isRoutineCiDeprecation
+} from "../ci/envelope.js";
 import { sha256Base64Url, sha256Text } from "../core/hash.js";
 import { splitRawLines, type LineRecord } from "../segment/segment.js";
 
@@ -374,6 +382,198 @@ function proposeVolatileTemplates(
   return proposals;
 }
 
+function proposeCiWrapperGroups(
+  artifact: ArtifactSnapshot
+): TransformProposal[] {
+  const analyses = analyzeCiLines(artifact);
+  if (!isRecognizedCiArtifact(analyses)) return [];
+  const stack: { start: number; title: string }[] = [];
+  const retainedCritical = ciCriticalOrdinalsToKeep(analyses);
+  const groups: { start: number; end: number; title: string }[] = [];
+  for (const [index, analysis] of analyses.entries()) {
+    if (analysis.directive === "group") {
+      stack.push({ start: index, title: analysis.groupTitle ?? "unnamed" });
+    } else if (analysis.directive === "endgroup") {
+      const opened = stack.pop();
+      if (opened !== undefined && index > opened.start + 1) {
+        groups.push({ start: opened.start, end: index, title: opened.title });
+      }
+    }
+  }
+
+  const proposals: TransformProposal[] = [];
+  const isSafeBodyLine = (
+    analysis: (typeof analyses)[number] | undefined
+  ): boolean =>
+    analysis !== undefined &&
+    analysis.content.trim().length > 0 &&
+    !retainedCritical.has(analysis.line.ordinal);
+  for (const group of groups) {
+    const isAllowedSafeBodyLine = (
+      analysis: (typeof analyses)[number] | undefined
+    ): boolean =>
+      isSafeBodyLine(analysis) &&
+      analysis !== undefined &&
+      isAllowedCiGroupBodyLine(analysis, group.title);
+    const body = analyses.slice(group.start + 1, group.end);
+    let start = 0;
+    while (start < body.length) {
+      while (
+        start < body.length &&
+        !isAllowedSafeBodyLine(body[start])
+      ) {
+        start += 1;
+      }
+      let end = start;
+      while (
+        end < body.length &&
+        isAllowedSafeBodyLine(body[end])
+      ) {
+        end += 1;
+      }
+      const first = body[start];
+      const last = body[end - 1];
+      if (
+        first !== undefined &&
+        last !== undefined &&
+        (end - start >= 2 ||
+          last.line.endByte - first.line.startByte >= 256)
+      ) {
+        proposals.push(
+          proposal(
+            artifact,
+            {
+              startByte: first.line.startByte,
+              endByte: last.line.endByte
+            },
+            "ci-wrapper",
+            70,
+            end - start,
+            {
+              ciRule: "group-safe-body",
+              groupTitle: group.title.slice(0, 160)
+            }
+          )
+        );
+      }
+      start = Math.max(end, start + 1);
+    }
+  }
+  return proposals;
+}
+
+function proposeCiEnvelopeRepetition(
+  artifact: ArtifactSnapshot
+): TransformProposal[] {
+  const analyses = analyzeCiLines(artifact);
+  if (!isRecognizedCiArtifact(analyses)) return [];
+  const retainedCritical = ciCriticalOrdinalsToKeep(analyses);
+  const groups = new Map<string, typeof analyses[number][]>();
+  for (const analysis of analyses) {
+    if (
+      !analysis.recognizedEnvelope ||
+      analysis.content.trim().length === 0 ||
+      retainedCritical.has(analysis.line.ordinal)
+    ) {
+      continue;
+    }
+    const existing = groups.get(analysis.stableSignature) ?? [];
+    existing.push(analysis);
+    groups.set(analysis.stableSignature, existing);
+  }
+
+  const proposals: TransformProposal[] = [];
+  for (const [signature, occurrences] of groups) {
+    if (occurrences.length < 3) continue;
+    const middle = occurrences.slice(1, -1);
+    let start = 0;
+    while (start < middle.length) {
+      let end = start + 1;
+      while (
+        end < middle.length &&
+        middle[end]?.line.ordinal ===
+          (middle[end - 1]?.line.ordinal ?? -2) + 1
+      ) {
+        end += 1;
+      }
+      const first = middle[start];
+      const last = middle[end - 1];
+      if (first !== undefined && last !== undefined) {
+        proposals.push(
+          proposal(
+            artifact,
+            {
+              startByte: first.line.startByte,
+              endByte: last.line.endByte
+            },
+            "ci-wrapper",
+            isRoutineCiDeprecation(first.content) ? 65 : 55,
+            end - start,
+            {
+              ciRule: "envelope-stable-repetition",
+              signatureSha256: sha256Text(signature),
+              totalOccurrences: occurrences.length
+            }
+          )
+        );
+      }
+      start = end;
+    }
+  }
+  return proposals;
+}
+
+function proposeCiRoutineWrapperRuns(
+  artifact: ArtifactSnapshot
+): TransformProposal[] {
+  const analyses = analyzeCiLines(artifact);
+  if (!isRecognizedCiArtifact(analyses)) return [];
+  const retainedCritical = ciCriticalOrdinalsToKeep(analyses);
+  const proposals: TransformProposal[] = [];
+  let start = 0;
+  while (start < analyses.length) {
+    if (
+      !isCiRoutineWrapperContent(analyses[start]?.content ?? "") ||
+      retainedCritical.has(analyses[start]?.line.ordinal ?? -1)
+    ) {
+      start += 1;
+      continue;
+    }
+    let end = start + 1;
+    while (
+      end < analyses.length &&
+      isCiRoutineWrapperContent(analyses[end]?.content ?? "") &&
+      !retainedCritical.has(analyses[end]?.line.ordinal ?? -1)
+    ) {
+      end += 1;
+    }
+    const first = analyses[start];
+    const last = analyses[end - 1];
+    if (
+      first !== undefined &&
+      last !== undefined &&
+      (end - start >= 2 ||
+        last.line.endByte - first.line.startByte >= 256)
+    ) {
+      proposals.push(
+        proposal(
+          artifact,
+          {
+            startByte: first.line.startByte,
+            endByte: last.line.endByte
+          },
+          "ci-wrapper",
+          60,
+          end - start,
+          { ciRule: "routine-wrapper-run" }
+        )
+      );
+    }
+    start = end;
+  }
+  return proposals;
+}
+
 export function proposeTransforms(
   artifact: ArtifactSnapshot,
   classification: ArtifactClassification,
@@ -392,6 +592,9 @@ export function proposeTransforms(
     ...proposeRepeatedAnchors(artifact, lines),
     ...proposeNonConsecutiveExact(artifact, lines),
     ...proposeSuccessChatter(artifact, lines, outcome),
+    ...proposeCiWrapperGroups(artifact),
+    ...proposeCiEnvelopeRepetition(artifact),
+    ...proposeCiRoutineWrapperRuns(artifact),
     ...proposeScopedBoilerplate(artifact, lines, classification),
     ...proposeVolatileTemplates(artifact, lines, outcome)
   ];

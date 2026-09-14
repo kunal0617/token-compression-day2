@@ -4,7 +4,7 @@ import type {
   ProtectedRange,
   TransformProposal
 } from "../contracts/types.js";
-import { sha256Base64Url, sha256Text } from "../core/hash.js";
+import { deterministicUuid, sha256Base64Url } from "../core/hash.js";
 import { rangesIntersect } from "../core/ranges.js";
 import { createHandle } from "../storage/handles.js";
 
@@ -21,7 +21,7 @@ function markerFor(transform: {
   byteLength: number;
   handle: string;
 }): string {
-  return `[CTXO OMIT reason=${transform.reason} count=${transform.sourceCount} bytes=${transform.byteLength} handle=${transform.handle}]\n`;
+  return `[CTXO OMIT r=${transform.reason} c=${transform.sourceCount} b=${transform.byteLength} h=${transform.handle}]\n`;
 }
 
 export function planTransforms(
@@ -67,15 +67,15 @@ export function planTransforms(
         left.endByte - right.endByte ||
         left.proposalId.localeCompare(right.proposalId)
     )
-    .map((candidate): PlannedTransform => {
+    .map((candidate, index): PlannedTransform => {
       const omitted = artifact.bytes.subarray(
         candidate.startByte,
         candidate.endByte
       );
       const omittedSha256 = sha256Base64Url(omitted);
-      const occurrenceId = `omission-${sha256Text(
-        `${runId}:${artifact.artifactId}:${candidate.startByte}:${candidate.endByte}:${candidate.reason}`
-      )}`;
+      const occurrenceId = deterministicUuid(
+        `${runId}:${artifact.ordinal}:${index}`
+      );
       const handle = createHandle(
         omittedSha256,
         omitted.length,
@@ -96,8 +96,9 @@ export function planTransforms(
       };
     })
     .filter((transform) => {
+      const markerBytes = Buffer.byteLength(transform.marker, "utf8");
       const beneficial =
-        transform.omittedByteLength > Buffer.byteLength(transform.marker, "utf8");
+        transform.omittedByteLength > markerBytes;
       if (!beneficial) rejectedNonBeneficial.push(transform.proposalId);
       return beneficial;
     });

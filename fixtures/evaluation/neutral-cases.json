@@ -1,0 +1,37 @@
+{
+  "cases": [
+    {
+      "caseId": "neutral-duplicate-failures",
+      "title": "Preserve two distinct failure occurrences",
+      "prompt": "Identify both failures and cite their exact evidence.",
+      "artifactPaths": ["evaluation/neutral-duplicate-failures.log"],
+      "expectedEvidenceIds": ["failure-a", "failure-b"],
+      "expectedFailureIds": ["failure-a", "failure-b"],
+      "expectedCitations": ["src/a.ts:10:2", "src/b.ts:20:4"],
+      "allowAbstention": false,
+      "source": "neutral"
+    },
+    {
+      "caseId": "neutral-missing-source",
+      "title": "Abstain when referenced source is unavailable",
+      "prompt": "Explain the root cause only if the referenced source is present.",
+      "artifactPaths": ["evaluation/neutral-missing-source.log"],
+      "expectedEvidenceIds": ["failure-summary"],
+      "expectedFailureIds": ["failure-summary"],
+      "expectedCitations": [],
+      "allowAbstention": true,
+      "source": "held-out"
+    },
+    {
+      "caseId": "neutral-ci-wrapper",
+      "title": "Preserve failed CI lane through wrapper noise",
+      "prompt": "Report the failed lane, step, metrics, and missing-detail gap.",
+      "artifactPaths": ["github-actions-metrics-synthetic.log"],
+      "expectedEvidenceIds": ["job", "step", "metrics", "zero-artifact"],
+      "expectedFailureIds": ["job"],
+      "expectedCitations": [],
+      "allowAbstention": true,
+      "source": "neutral"
+    }
+  ]
+}

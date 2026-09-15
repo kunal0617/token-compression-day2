@@ -1,0 +1,18 @@
+{
+  "formatVersion": 1,
+  "kind": "recorded-offline-fallback",
+  "description": "Sanitized Day0-5 demonstration used when live model evaluation is not explicitly enabled.",
+  "stages": [
+    "raw-byte intake and classification",
+    "evidence extraction and protected closure",
+    "transactional reduction and reconstruction",
+    "exact source provenance and bounded source scope",
+    "evidence obligations and terminal approval",
+    "security and model-fit advice",
+    "offline handoff and paired evaluation"
+  ],
+  "integrity": "byte-identical",
+  "contentTelemetry": "disabled",
+  "externalLiveSend": "blocked-by-default"
+}
+

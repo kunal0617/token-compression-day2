@@ -1,0 +1,48 @@
+{
+  "name": "context-overflow",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Deterministic offline context reduction with byte-identical reconstruction.",
+  "license": "Apache-2.0",
+  "bin": {
+    "context-overflow": "./dist/src/main.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "npm run typecheck && npm test && npm run build && npm run smoke:bin",
+    "check:full-capability": "npm run check && npm run smoke:copilot",
+    "demo": "npm run build && node dist\\scripts\\run-demo.js",
+    "demo:day0-5": "npm run build && node dist\\scripts\\day0-5-demo.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:unit": "vitest run tests/unit",
+    "test:integration": "vitest run tests/integration tests/adversarial tests/crash tests/mutation tests/property",
+    "test:parity": "vitest run tests/unit/provenance.test.ts tests/unit/failure-parsers.test.ts tests/unit/obligations.test.ts tests/unit/source-scope.test.ts tests/unit/approval.test.ts tests/integration/tui.test.ts tests/integration/external-manual-parity.test.ts tests/unit/copilot-sdk-adapter.test.ts tests/unit/model-fit.test.ts tests/unit/helper.test.ts tests/unit/security.test.ts tests/unit/evaluation.test.ts tests/migration/producer-registry.test.ts",
+    "parity:external": "npm run build && node dist\\scripts\\external-manual-parity.js",
+    "benchmark:export": "npm run build && node dist\\src\\main.js benchmark export",
+    "benchmark:live": "npm run build && node dist\\src\\main.js benchmark live",
+    "benchmark:report": "npm run build && node dist\\src\\main.js benchmark report",
+    "smoke:bin": "node scripts/smoke-bin.mjs",
+    "smoke:copilot": "npm run build && node dist\\scripts\\copilot-sdk-smoke.js"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "fast-check": "^4.9.0",
+    "vitest": "^3.2.4"
+  },
+  "dependencies": {
+    "js-tiktoken": "^1.0.21",
+    "tree-sitter": "^0.21.1",
+    "tree-sitter-javascript": "^0.23.1",
+    "tree-sitter-typescript": "^0.23.2",
+    "typescript": "^5.9.3",
+    "zod": "^4.5.4"
+  },
+  "optionalDependencies": {
+    "@github/copilot-sdk": "^1.0.13"
+  }
+}

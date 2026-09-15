@@ -1,0 +1,176 @@
+﻿2031-04-05T10:00:00.0000000Z Current runner version: '9.9.9'
+2031-04-05T10:00:00.0100000Z ##[group]Runner Image Provisioner
+2031-04-05T10:00:00.0200000Z Hosted Compute Agent
+2031-04-05T10:00:00.0300000Z Version: 20310401.1
+2031-04-05T10:00:00.0400000Z Commit: 1111111111111111111111111111111111111111
+2031-04-05T10:00:00.0500000Z Worker ID: {11111111-2222-4333-8444-555555555555}
+2031-04-05T10:00:00.0600000Z Region: example-region
+2031-04-05T10:00:00.0700000Z ##[endgroup]
+2031-04-05T10:00:00.0800000Z ##[group]Runner Image
+2031-04-05T10:00:00.0900000Z Image: ubuntu-demo
+2031-04-05T10:00:00.1000000Z Version: 20310402.2
+2031-04-05T10:00:00.1100000Z Included Software: https://example.invalid/runner-image/readme
+2031-04-05T10:00:00.1200000Z Image Release: https://example.invalid/runner-image/release
+2031-04-05T10:00:00.1300000Z ##[endgroup]
+2031-04-05T10:00:00.1400000Z ##[group]Inputs
+2031-04-05T10:00:00.1500000Z   branch: release-demo
+2031-04-05T10:00:00.1600000Z   source-branch: release-demo
+2031-04-05T10:00:00.1700000Z   image-name: demo-image-2031
+2031-04-05T10:00:00.1800000Z   run-count: 1
+2031-04-05T10:00:00.1900000Z ##[endgroup]
+2031-04-05T10:00:00.2000000Z Complete job name: metrics / summarize
+2031-04-05T10:00:00.2100000Z ##[group]Run JOBS_OUTPUT=$(
+2031-04-05T10:00:00.2200000Z [36;1mJOBS_OUTPUT=$([0m
+2031-04-05T10:00:00.2300000Z [36;1m  gh api \[0m
+2031-04-05T10:00:00.2400000Z [36;1m    --paginate \[0m
+2031-04-05T10:00:00.2500000Z [36;1m    --slurp \[0m
+2031-04-05T10:00:00.2600000Z [36;1m    -H "Accept: application/json" \[0m
+2031-04-05T10:00:00.2700000Z [36;1m    "/repos/octo/demo/actions/runs/$RUN_ID/jobs" |[0m
+2031-04-05T10:00:00.2800000Z [36;1m    jq '{jobs: [.[].jobs[]]}'[0m
+2031-04-05T10:00:00.2900000Z [36;1m)[0m
+2031-04-05T10:00:00.3000000Z [36;1mecho "::group::Jobs Output"[0m
+2031-04-05T10:00:00.3100000Z [36;1mecho "$JOBS_OUTPUT" | jq .[0m
+2031-04-05T10:00:00.3200000Z [36;1mecho "::endgroup::"[0m
+2031-04-05T10:00:00.3300000Z [36;1mecho "$JOBS_OUTPUT" > jobs-$RUN_ID.json[0m
+2031-04-05T10:00:00.3400000Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2031-04-05T10:00:00.3500000Z env:
+2031-04-05T10:00:00.3600000Z   RUN_ID: 424242
+2031-04-05T10:00:00.3700000Z   RUN_COUNT: 1
+2031-04-05T10:00:00.3800000Z ##[endgroup]
+2031-04-05T10:00:00.3900000Z ##[group]Jobs Output
+2031-04-05T10:00:00.4000000Z {
+2031-04-05T10:00:00.4100000Z   "jobs": [
+2031-04-05T10:00:00.4200000Z     {
+2031-04-05T10:00:00.4300000Z       "id": 7001,
+2031-04-05T10:00:00.4400000Z       "run_id": 424242,
+2031-04-05T10:00:00.4500000Z       "workflow_name": "Build Demo Image (release-demo)",
+2031-04-05T10:00:00.4600000Z       "head_branch": "main",
+2031-04-05T10:00:00.4700000Z       "head_sha": "2222222222222222222222222222222222222222",
+2031-04-05T10:00:00.4800000Z       "status": "completed",
+2031-04-05T10:00:00.4900000Z       "conclusion": "failure",
+2031-04-05T10:00:00.5000000Z       "name": "test (linux-image-build)",
+2031-04-05T10:00:00.5100000Z       "steps": [
+2031-04-05T10:00:00.5200000Z         {
+2031-04-05T10:00:00.5300000Z           "name": "Set up job",
+2031-04-05T10:00:00.5400000Z           "status": "completed",
+2031-04-05T10:00:00.5500000Z           "conclusion": "failure"
+2031-04-05T10:00:00.5600000Z         }
+2031-04-05T10:00:00.5700000Z       ]
+2031-04-05T10:00:00.5800000Z     },
+2031-04-05T10:00:00.5900000Z     {
+2031-04-05T10:00:00.6000000Z       "id": 7002,
+2031-04-05T10:00:00.6100000Z       "run_id": 424242,
+2031-04-05T10:00:00.6200000Z       "workflow_name": "Build Demo Image (release-demo)",
+2031-04-05T10:00:00.6300000Z       "head_branch": "main",
+2031-04-05T10:00:00.6400000Z       "head_sha": "2222222222222222222222222222222222222222",
+2031-04-05T10:00:00.6500000Z       "status": "in_progress",
+2031-04-05T10:00:00.6600000Z       "conclusion": null,
+2031-04-05T10:00:00.6700000Z       "name": "metrics / summarize"
+2031-04-05T10:00:00.6800000Z     }
+2031-04-05T10:00:00.6900000Z   ]
+2031-04-05T10:00:00.7000000Z }
+2031-04-05T10:00:00.7100000Z ##[endgroup]
+2031-04-05T10:00:00.7200000Z ##[group]Run calculate metrics
+2031-04-05T10:00:00.7300000Z [36;1mtotal_count=0[0m
+2031-04-05T10:00:00.7400000Z [36;1msuccess_count=0[0m
+2031-04-05T10:00:00.7500000Z [36;1mskipped_count=0[0m
+2031-04-05T10:00:00.7600000Z [36;1mconclusion_json='{'[0m
+2031-04-05T10:00:00.7700000Z [36;1mfor job in $(jq -c '.jobs[]' jobs-$RUN_ID.json); do[0m
+2031-04-05T10:00:00.7800000Z [36;1m  job_name=$(echo "$job" | jq -r '.name')[0m
+2031-04-05T10:00:00.7900000Z [36;1m  job_state=$(echo "$job" | jq -r '.conclusion')[0m
+2031-04-05T10:00:00.8000000Z [36;1m  total_count=$((total_count + 1))[0m
+2031-04-05T10:00:00.8100000Z [36;1m  conclusion_json+="\"$job_name\":\"$job_state\","[0m
+2031-04-05T10:00:00.8200000Z [36;1mdone[0m
+2031-04-05T10:00:00.8210000Z [36;1mecho "wrapper metric calculation prepared"[0m
+2031-04-05T10:00:00.8220000Z [36;1mecho "wrapper metric calculation validated"[0m
+2031-04-05T10:00:00.8230000Z [36;1mecho "wrapper job output loaded"[0m
+2031-04-05T10:00:00.8240000Z [36;1mecho "wrapper job output parsed"[0m
+2031-04-05T10:00:00.8250000Z [36;1mecho "wrapper counters initialized"[0m
+2031-04-05T10:00:00.8260000Z [36;1mecho "wrapper counters updated"[0m
+2031-04-05T10:00:00.8270000Z [36;1mecho "wrapper conclusion assembled"[0m
+2031-04-05T10:00:00.8280000Z [36;1mecho "wrapper outputs prepared"[0m
+2031-04-05T10:00:00.8300000Z [36;1mconclusion_json=$(echo "$conclusion_json" | sed 's/,$/}/')[0m
+2031-04-05T10:00:00.8400000Z [36;1mecho "$conclusion_json" | jq[0m
+2031-04-05T10:00:00.8500000Z [36;1mecho "jobs_executed=$total_count" >> "$GITHUB_OUTPUT"[0m
+2031-04-05T10:00:00.8600000Z [36;1mecho "jobs_skipped=$skipped_count" >> "$GITHUB_OUTPUT"[0m
+2031-04-05T10:00:00.8700000Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2031-04-05T10:00:00.8800000Z env:
+2031-04-05T10:00:00.8900000Z   RUN_ID: 424242
+2031-04-05T10:00:00.9000000Z ##[endgroup]
+2031-04-05T10:00:00.9100000Z script_name: linux-image-build, script_conclusion: failure
+2031-04-05T10:00:00.9200000Z success_count: 0
+2031-04-05T10:00:00.9300000Z total_count: 1
+2031-04-05T10:00:00.9400000Z failed_count: 1
+2031-04-05T10:00:00.9500000Z success_percent: 0
+2031-04-05T10:00:00.9600000Z Node 20 is being deprecated. This workflow is running with Node 24 by default. See https://example.invalid/deprecation.
+2031-04-05T10:00:00.9700000Z Node 20 is being deprecated. This workflow is running with Node 24 by default. See https://example.invalid/deprecation.
+2031-04-05T10:00:00.9800000Z Node 20 is being deprecated. This workflow is running with Node 24 by default. See https://example.invalid/deprecation.
+2031-04-05T10:00:00.9900000Z Node 20 is being deprecated. This workflow is running with Node 24 by default. See https://example.invalid/deprecation.
+2031-04-05T10:00:01.0000000Z ##[group]Run metrics publisher
+2031-04-05T10:00:01.0100000Z with:
+2031-04-05T10:00:01.0200000Z   api-key: ***
+2031-04-05T10:00:01.0300000Z   metrics: - type: "distribution"
+  name: "demo.ci.workflow_success_percent"
+  value: 0
+  host: github
+  tags:
+    - "repository:octo/demo"
+    - "workflow:Build Demo Image"
+    - "branch:release-demo"
+    - "commit:2222222222222222222222222222222222222222"
+    - "runid:424242"
+    - "runcount:1"
+- type: "distribution"
+  name: "demo.ci.jobs_executed"
+  value: 1
+  host: github
+  tags:
+    - "repository:octo/demo"
+    - "workflow:Build Demo Image"
+    - "branch:release-demo"
+    - "commit:2222222222222222222222222222222222222222"
+    - "runid:424242"
+    - "runcount:1"
+- type: "distribution"
+  name: "demo.ci.jobs_failed"
+  value: 1
+  host: github
+  tags:
+    - "repository:octo/demo"
+    - "workflow:Build Demo Image"
+    - "branch:release-demo"
+    - "commit:2222222222222222222222222222222222222222"
+    - "runid:424242"
+    - "runcount:1"
+2031-04-05T10:00:01.0400000Z ##[endgroup]
+2031-04-05T10:00:01.0500000Z ##[group]Run checkout action
+2031-04-05T10:00:01.0600000Z with:
+2031-04-05T10:00:01.0700000Z   fetch-depth: 1
+2031-04-05T10:00:01.0800000Z   path: summary-source
+2031-04-05T10:00:01.0900000Z   repository: octo/demo
+2031-04-05T10:00:01.1000000Z   ref: release-demo
+2031-04-05T10:00:01.1100000Z   token: ***
+2031-04-05T10:00:01.1200000Z   ssh-strict: true
+2031-04-05T10:00:01.1300000Z   ssh-user: git
+2031-04-05T10:00:01.1400000Z   persist-credentials: true
+2031-04-05T10:00:01.1500000Z   clean: true
+2031-04-05T10:00:01.1600000Z   fetch-tags: false
+2031-04-05T10:00:01.1700000Z   show-progress: true
+2031-04-05T10:00:01.1800000Z   lfs: false
+2031-04-05T10:00:01.1900000Z   submodules: false
+2031-04-05T10:00:01.2000000Z ##[endgroup]
+2031-04-05T10:00:01.2100000Z Prepare workflow directory
+2031-04-05T10:00:01.2200000Z Prepare all required actions
+2031-04-05T10:00:01.2300000Z Getting action download info
+2031-04-05T10:00:01.2400000Z Download action repository 'actions/example@3333333333333333333333333333333333333333'
+2031-04-05T10:00:01.2500000Z Post job cleanup.
+2031-04-05T10:00:01.2600000Z Temporarily overriding HOME='/home/runner/work/_temp/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+2031-04-05T10:00:01.2700000Z Adding repository directory to the temporary git global config as a safe directory
+2031-04-05T10:00:01.2800000Z Evaluate and set job outputs
+2031-04-05T10:00:01.2900000Z Set output 'success-percent'
+2031-04-05T10:00:01.3000000Z Set output 'jobs-executed'
+2031-04-05T10:00:01.3100000Z Set output 'jobs-failed'
+2031-04-05T10:00:01.3200000Z Cleaning up orphan processes
+2031-04-05T10:00:01.3300000Z Found 0 artifact(s)
+2031-04-05T10:00:01.3400000Z Total of 0 artifact(s) downloaded
+2031-04-05T10:00:01.3500000Z ##[warning]Node.js 20 is deprecated for actions/example@3333333333333333333333333333333333333333.

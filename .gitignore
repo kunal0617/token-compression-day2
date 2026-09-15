@@ -1,0 +1,9 @@
+node_modules/
+dist/
+coverage/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.log
+!fixtures/**/*.log
+.context-overflow/

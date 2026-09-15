@@ -277,6 +277,42 @@ describe("committed run read-scope authority", () => {
             readScope: scope
           }).ok
         ).toBe(false);
+        const currentSubject = reviewSubjectProvider.provide({
+          ...subject.value,
+          payload: unrelated,
+          sourceIdentities: [
+            {
+              sourceId: "invented-current",
+              identity: {
+                sha256: sha256Base64Url(unrelated),
+                byteLength: unrelated.length
+              }
+            }
+          ],
+          snapshotChoice: "current",
+          payloadRole: "current"
+        });
+        expect(currentSubject.ok).toBe(true);
+        if (!currentSubject.ok) return;
+        const currentApproval = approveReviewSubject({
+          subject: currentSubject.value,
+          payload: unrelated,
+          decision: "approve-selected"
+        });
+        expect(currentApproval.ok).toBe(true);
+        if (!currentApproval.ok) return;
+        expect(
+          authority.issueReview({
+            runId: scope.runId,
+            approved: {
+              bytes: unrelated,
+              subject: currentSubject.value,
+              approval: currentApproval.value,
+              evidenceFacts: []
+            },
+            readScope: scope
+          }).ok
+        ).toBe(false);
       } finally {
         store.close();
       }

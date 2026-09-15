@@ -533,8 +533,9 @@ export class ExternalManualParityAdapter {
         ? assessFailureEvidence({
             artifact,
             evidence,
-            additionalFacts: retrieved.value,
-            trustedRetrievalProducers: [adapter.metadata]
+            additionalFacts: retrieved.value.facts,
+            trustedRetrievalProducers: [adapter.metadata],
+            retrievalReceipts: retrieved.value.receipts
           })
         : retrieved;
     const passed =
@@ -661,7 +662,9 @@ export class ExternalManualParityAdapter {
           contract: input.contract,
           status:
             input.contract === "Luna-style"
-              ? "not-applicable"
+              ? passed
+                ? "not-applicable"
+                : "fail"
               : passed
                 ? "pass"
                 : "fail",
@@ -682,7 +685,9 @@ export class ExternalManualParityAdapter {
           },
           reasons: [
             input.contract === "Luna-style"
-              ? "Local pass-through integrity was verified; live Luna execution is not applicable to the read-only adapter"
+              ? passed
+                ? "Local pass-through integrity was verified; live Luna execution is not applicable to the read-only adapter"
+                : "Local Luna pass-through integrity failed"
               : passed
                 ? "Repetition reduction, retrieval, integrity, and reconstruction passed"
                 : "Prepared contract did not satisfy reduction or integrity requirements"
@@ -1237,6 +1242,12 @@ export function manualParityEvaluationCase(
     allowAbstention: result.status === "not-applicable",
     source: "external"
   };
+}
+
+export function manualParityExitCode(
+  report: ManualParityReport
+): 0 | 1 {
+  return report.summary.failed === 0 ? 0 : 1;
 }
 
 export const externalManualParityProducer = Object.freeze({

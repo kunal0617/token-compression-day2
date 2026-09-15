@@ -44,6 +44,12 @@
   set, read scope, and completed evidence obligations. It issues an opaque
   random capability persisted in SQLite; self-calculated approval hashes alone
   cannot authorize a send.
+- Bounded retrieval results require a persisted opaque execution receipt that
+  binds request, response, adapter, and returned-fact digests. Copying trusted
+  adapter metadata and recomputing public hashes is insufficient.
+- Live SDK authority is limited to committed prepared/captured bytes. Locally
+  reviewed current/both/merged payloads cannot cross the SDK boundary without a
+  future trusted capture/merge attestation.
 - SDK operations are serialized so cached-session sends, event subscriptions,
   and permission/scope reconfiguration cannot overlap.
 - Hosted evidence helpers must attest the enforced empty-mode client

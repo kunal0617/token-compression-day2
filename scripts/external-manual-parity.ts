@@ -2,7 +2,10 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import { canonicalJson } from "../src/core/canonical.js";
-import { ExternalManualParityAdapter } from "../src/evaluation/manual-parity.js";
+import {
+  ExternalManualParityAdapter,
+  manualParityExitCode
+} from "../src/evaluation/manual-parity.js";
 
 function option(name: string): string | undefined {
   const index = process.argv.indexOf(`--${name}`);
@@ -60,3 +63,4 @@ process.stdout.write(
     2
   )}\n`
 );
+process.exitCode = manualParityExitCode(report.value);

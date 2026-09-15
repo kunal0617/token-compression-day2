@@ -10,7 +10,10 @@ import type {
 } from "../contracts/tui.js";
 import type { ApprovalRecord, ReviewSubject } from "../contracts/approval.js";
 import type { EvidenceObligation } from "../contracts/providers.js";
-import type { EvidenceFact } from "../contracts/obligations.js";
+import type {
+  EvidenceFact,
+  EvidenceRetrievalReceipt
+} from "../contracts/obligations.js";
 import type { SourceSnapshotIdentity } from "../contracts/provenance.js";
 import { canonicalJsonDigest } from "../core/canonical.js";
 import { sha256Base64Url } from "../core/hash.js";
@@ -35,6 +38,13 @@ export interface ReviewRetrievalPort {
   saveReviewFacts?(
     runId: string,
     facts: readonly EvidenceFact[]
+  ): Result<void>;
+  loadEvidenceRetrievalReceipts?(
+    runId: string
+  ): Result<readonly EvidenceRetrievalReceipt[]>;
+  saveEvidenceRetrievalReceipts?(
+    runId: string,
+    receipts: readonly EvidenceRetrievalReceipt[]
   ): Result<void>;
 }
 
@@ -64,6 +74,8 @@ function transformationLines(input: TerminalReviewInput): readonly string[] {
 function obligations(
   input: TerminalReviewInput,
   gatheredFacts: readonly EvidenceFact[]
+  ,
+  retrievalReceipts: readonly EvidenceRetrievalReceipt[]
 ): readonly EvidenceObligation[] {
   const results: EvidenceObligation[] = [];
   for (const artifact of input.artifacts) {
@@ -76,7 +88,8 @@ function obligations(
       additionalFacts: gatheredFacts,
       trustedRetrievalProducers: [
         ...(input.retrievalAdapters?.values() ?? [])
-      ].map((adapter) => adapter.metadata)
+      ].map((adapter) => adapter.metadata),
+      retrievalReceipts
     });
     if (assessed.ok) results.push(...assessed.value.sufficiency.obligations);
   }
@@ -110,6 +123,7 @@ export class TerminalReviewController {
   #status: ReviewViewModel["status"] = "reviewing";
   readonly #security;
   #gatheredFacts: EvidenceFact[];
+  #retrievalReceipts: EvidenceRetrievalReceipt[];
 
   constructor(input: TerminalReviewInput, retrieval: ReviewRetrievalPort) {
     this.#input = input;
@@ -124,6 +138,13 @@ export class TerminalReviewController {
       ...(input.gatheredFacts ?? []),
       ...(persisted?.ok ? persisted.value : [])
     ];
+    const persistedReceipts =
+      retrieval.loadEvidenceRetrievalReceipts?.(
+        input.contextPackage.runId
+      );
+    this.#retrievalReceipts = persistedReceipts?.ok
+      ? [...persistedReceipts.value]
+      : [];
     this.#security = assessSecurity(
       input.artifacts.map((artifact) => ({
         sourceId: artifact.artifactId,
@@ -236,26 +257,36 @@ export class TerminalReviewController {
       decision
     });
     if (!approval.ok) return approval;
-    if (this.#input.approvalAuthority === undefined) {
-      return failure(
-        "INTEGRITY_ERROR",
-        "A committed-run approval authority is required"
-      );
+    const requiresCommittedAuthority =
+      this.#payloadRole === "prepared" ||
+      this.#payloadRole === "captured" ||
+      this.#target.permissions.network;
+    let authorityToken: string;
+    if (requiresCommittedAuthority) {
+      if (this.#input.approvalAuthority === undefined) {
+        return failure(
+          "INTEGRITY_ERROR",
+          "A committed-run approval authority is required"
+        );
+      }
+      const authority = this.#input.approvalAuthority.issueReview({
+        runId: this.#input.contextPackage.runId,
+        approved: {
+          bytes: Buffer.from(this.#selectedBytes),
+          subject: subject.value,
+          approval: approval.value,
+          evidenceFacts: [...this.#gatheredFacts]
+        },
+        readScope: this.#input.readScope
+      });
+      if (!authority.ok) return authority;
+      authorityToken = authority.value;
+    } else {
+      authorityToken = `ctxo-local-review:v1:${approval.value.digest}`;
     }
-    const authority = this.#input.approvalAuthority.issueReview({
-      runId: this.#input.contextPackage.runId,
-      approved: {
-        bytes: Buffer.from(this.#selectedBytes),
-        subject: subject.value,
-        approval: approval.value,
-        evidenceFacts: [...this.#gatheredFacts]
-      },
-      readScope: this.#input.readScope
-    });
-    if (!authority.ok) return authority;
     this.#subject = subject.value;
     this.#approval = approval.value;
-    this.#authorityToken = authority.value;
+    this.#authorityToken = authorityToken;
     this.#status = "approved";
     return success(undefined);
   }
@@ -388,7 +419,8 @@ export class TerminalReviewController {
           additionalFacts: this.#gatheredFacts,
           trustedRetrievalProducers: [
             ...retrievalAdapters.values()
-          ].map((adapter) => adapter.metadata)
+          ].map((adapter) => adapter.metadata),
+          retrievalReceipts: this.#retrievalReceipts
         });
         return assessed.ok
           ? assessed.value.sufficiency.retrievalRequests
@@ -405,9 +437,24 @@ export class TerminalReviewController {
       retrievalAdapters
     );
     if (!retrieved.ok) return retrieved;
+    const savedReceipts =
+      this.#retrieval.saveEvidenceRetrievalReceipts?.(
+        this.#input.contextPackage.runId,
+        retrieved.value.receipts
+      );
+    if (savedReceipts !== undefined && !savedReceipts.ok) {
+      return savedReceipts;
+    }
+    this.#retrievalReceipts = [
+      ...this.#retrievalReceipts,
+      ...retrieved.value.receipts
+    ];
     this.#gatheredFacts = [
       ...new Map(
-        [...this.#gatheredFacts, ...retrieved.value].map((fact) => [
+        [
+          ...this.#gatheredFacts,
+          ...retrieved.value.facts
+        ].map((fact) => [
           fact.factId,
           fact
         ])
@@ -492,7 +539,11 @@ export class TerminalReviewController {
   }
 
   view(): ReviewViewModel {
-    const gaps = obligations(this.#input, this.#gatheredFacts).filter(
+    const gaps = obligations(
+      this.#input,
+      this.#gatheredFacts,
+      this.#retrievalReceipts
+    ).filter(
       (obligation) => obligation.status !== "satisfied"
     );
     return {

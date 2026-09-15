@@ -34,6 +34,7 @@ export interface EvidenceFact {
   readonly validationDigest: string;
   readonly origin: "detector-evidence" | "bounded-retrieval";
   readonly retrievalBinding?: {
+    readonly receiptId: string;
     readonly requestDigest: string;
     readonly responseDigest: string;
     readonly adapter: ProducerMetadata;
@@ -75,6 +76,20 @@ export interface EvidenceRetrievalAdapter {
   retrieve(
     request: EvidenceRetrievalRequest
   ): Promise<Result<readonly EvidenceFact[]>>;
+}
+
+export interface EvidenceRetrievalReceipt {
+  readonly receiptId: string;
+  readonly requestDigest: string;
+  readonly responseDigest: string;
+  readonly adapter: ProducerMetadata;
+  readonly factDigests: readonly string[];
+  readonly digest: string;
+}
+
+export interface EvidenceRetrievalExecution {
+  readonly facts: readonly EvidenceFact[];
+  readonly receipts: readonly EvidenceRetrievalReceipt[];
 }
 
 export interface ObligationBuildInput {

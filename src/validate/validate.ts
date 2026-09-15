@@ -959,7 +959,9 @@ export function verifyStoredRun(
       : undefined;
   if (completion !== undefined && !completion.ok) return completion;
   const evidenceCompletionDigest =
-    completion?.ok ? completion.value?.factsDigest : undefined;
+    completion?.ok && completion.value !== undefined
+      ? canonicalJsonDigest(completion.value)
+      : undefined;
   return success({
     runId,
     preparedBytes: prepared.value,

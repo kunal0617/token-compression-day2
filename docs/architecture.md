@@ -77,12 +77,19 @@ historical receipts fail explicitly.
 6. Any validation failure changes only that staging run to `failed`. A staging
    crash remains invisible to public reads.
 
-Gathered evidence is stored as adapter-bound facts. When the validated fact set
-satisfies every required obligation, SQLite records a separate immutable
-completion digest without rewriting the canonical run manifest. Review
+Gathered evidence is stored as facts linked to opaque retrieval-execution
+receipts that bind the request, complete response, adapter, and fact digests.
+When the validated fact set satisfies every required obligation, SQLite records
+a separate immutable completion digest over both facts and receipts without
+rewriting the canonical run manifest. Review
 approval then stores an opaque random capability bound to the complete subject,
 payload, read scope, and fact set. The Copilot adapter accepts no caller-minted
 self-hash in place of that committed authority.
+
+External SDK send authority currently accepts committed `prepared` or
+`captured` payload roles only. Current/both/editable-merge review remains
+available for local/offline use; live send stays blocked until a trusted
+current-source/merge attestation port is supplied.
 
 ## Determinism
 

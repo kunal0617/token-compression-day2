@@ -3,11 +3,14 @@ import type {
   EvidenceFact,
   EvidenceObligationSpec,
   EvidenceRetrievalAdapter,
+  EvidenceRetrievalExecution,
+  EvidenceRetrievalReceipt,
   EvidenceRetrievalRequest,
   EvidenceSufficiencyResult,
   ObligationBuildInput,
   ObligationKind
 } from "../contracts/obligations.js";
+import { randomUUID } from "node:crypto";
 import type {
   EvidenceObligation,
   PolicyRule,
@@ -389,7 +392,8 @@ export function validateEvidenceFact(
   fact: EvidenceFact,
   spec: EvidenceObligationSpec,
   evidence: readonly EvidenceSpan[],
-  trustedRetrievalProducers: readonly ProducerMetadata[]
+  trustedRetrievalProducers: readonly ProducerMetadata[],
+  retrievalReceipts: readonly EvidenceRetrievalReceipt[] = []
 ): boolean {
   const { validationDigest, ...unsigned } = fact;
   const retrievalRequest =
@@ -411,7 +415,24 @@ export function validateEvidenceFact(
       (producer) =>
         canonicalJsonDigest(producer) ===
         canonicalJsonDigest(fact.retrievalBinding?.adapter)
-    );
+    ) &&
+    retrievalReceipts.some((receipt) => {
+      const { digest, ...unsigned } = receipt;
+      return (
+        receipt.receiptId ===
+          fact.retrievalBinding?.receiptId &&
+        receipt.requestDigest ===
+          fact.retrievalBinding?.requestDigest &&
+        receipt.responseDigest ===
+          fact.retrievalBinding?.responseDigest &&
+        canonicalJsonDigest(receipt.adapter) ===
+          canonicalJsonDigest(
+            fact.retrievalBinding?.adapter
+          ) &&
+        receipt.factDigests.includes(fact.validationDigest) &&
+        digest === canonicalJsonDigest(unsigned)
+      );
+    });
   return (
     validationDigest === canonicalJsonDigest(unsigned) &&
     fact.obligationId === spec.obligationId &&
@@ -451,7 +472,8 @@ export class EvidenceObligationEvaluator {
     facts: readonly EvidenceFact[],
     now = new Date(),
     evidence: readonly EvidenceSpan[] = [],
-    trustedRetrievalProducers: readonly ProducerMetadata[] = []
+    trustedRetrievalProducers: readonly ProducerMetadata[] = [],
+    retrievalReceipts: readonly EvidenceRetrievalReceipt[] = []
   ): EvidenceSufficiencyResult {
     const obligations: EvidenceObligation[] = specs.map((item) => {
       const matches = facts.filter(
@@ -460,7 +482,8 @@ export class EvidenceObligationEvaluator {
             fact,
             item,
             evidence,
-            trustedRetrievalProducers
+            trustedRetrievalProducers,
+            retrievalReceipts
           )
       );
       const values = [...new Set(matches.map((fact) => fact.value))];
@@ -582,7 +605,7 @@ export class GatherMoreEvidencePolicy
 export async function executeBoundedRetrieval(
   requests: readonly EvidenceRetrievalRequest[],
   adapters: ReadonlyMap<string, EvidenceRetrievalAdapter>
-): Promise<Result<readonly EvidenceFact[]>> {
+): Promise<Result<EvidenceRetrievalExecution>> {
   if (requests.length > MAX_RETRIEVAL_REQUESTS) {
     return failure("LIMIT_EXCEEDED", "Too many evidence retrieval requests", {
       requests: requests.length,
@@ -590,6 +613,7 @@ export async function executeBoundedRetrieval(
     });
   }
   const facts: EvidenceFact[] = [];
+  const receipts: EvidenceRetrievalReceipt[] = [];
   for (const request of requests) {
     if (
       request.maxBytes <= 0 ||
@@ -622,6 +646,7 @@ export async function executeBoundedRetrieval(
     if (!retrieved.ok) return retrieved;
     const requestDigest = canonicalJsonDigest(request);
     const responseDigest = canonicalJsonDigest(retrieved.value);
+    const receiptId = randomUUID();
     let totalBytes = 0;
     const boundFacts: EvidenceFact[] = [];
     for (const fact of retrieved.value) {
@@ -666,6 +691,7 @@ export async function executeBoundedRetrieval(
           byteLength: fact.byteLength,
           origin: "bounded-retrieval",
           retrievalBinding: {
+            receiptId,
             requestDigest,
             responseDigest,
             adapter: structuredClone(adapter.metadata)
@@ -687,8 +713,26 @@ export async function executeBoundedRetrieval(
       );
     }
     facts.push(...boundFacts);
+    const receiptUnsigned = {
+      receiptId,
+      requestDigest,
+      responseDigest,
+      adapter: structuredClone(adapter.metadata),
+      factDigests: boundFacts
+        .map((fact) => fact.validationDigest)
+        .sort((left, right) =>
+          Buffer.compare(
+            Buffer.from(left, "utf8"),
+            Buffer.from(right, "utf8")
+          )
+        )
+    };
+    receipts.push({
+      ...receiptUnsigned,
+      digest: canonicalJsonDigest(receiptUnsigned)
+    });
   }
-  return success(facts);
+  return success({ facts, receipts });
 }
 
 export function assessFailureEvidence(input: {
@@ -696,6 +740,7 @@ export function assessFailureEvidence(input: {
   readonly evidence: readonly EvidenceSpan[];
   readonly additionalFacts?: readonly EvidenceFact[];
   readonly trustedRetrievalProducers?: readonly ProducerMetadata[];
+  readonly retrievalReceipts?: readonly EvidenceRetrievalReceipt[];
 }): Result<{
   readonly reports: readonly FailureReport[];
   readonly sufficiency: EvidenceSufficiencyResult;
@@ -720,7 +765,8 @@ export function assessFailureEvidence(input: {
     facts,
     new Date(),
     input.evidence,
-    input.trustedRetrievalProducers ?? []
+    input.trustedRetrievalProducers ?? [],
+    input.retrievalReceipts ?? []
   );
   const decision = gatherMoreEvidencePolicy.decide(sufficiency);
   if (!decision.ok) return decision;

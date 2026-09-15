@@ -10,7 +10,10 @@ import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { canonicalJson } from "../../src/core/canonical.js";
-import { ExternalManualParityAdapter } from "../../src/evaluation/manual-parity.js";
+import {
+  ExternalManualParityAdapter,
+  manualParityExitCode
+} from "../../src/evaluation/manual-parity.js";
 
 const files: Readonly<Record<string, string>> = {
   "cq01-source-match/inventory-reconciler.ts":
@@ -108,6 +111,36 @@ describe("safe external manual parity adapter", () => {
         maxFileBytes: 8
       }).run();
       expect(result.ok).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("returns a failing command status for logical contract failures", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ctxo-manual-fail-"));
+    try {
+      writeFixture(root);
+      writeFileSync(
+        join(root, "cq01-source-match", "request.txt"),
+        "No exact source fence is present.",
+        "utf8"
+      );
+      writeFileSync(
+        join(root, "luna", "prompt.txt"),
+        Buffer.from([0xff, 0xfe])
+      );
+      const result = await new ExternalManualParityAdapter({
+        root
+      }).run();
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.summary.failed).toBeGreaterThan(0);
+      expect(manualParityExitCode(result.value)).toBe(1);
+      expect(
+        result.value.cases.find(
+          (item) => item.caseId === "luna"
+        )?.status
+      ).toBe("fail");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

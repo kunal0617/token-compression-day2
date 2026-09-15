@@ -17,7 +17,9 @@ subprocess, use the network, or inherit an external command environment. The
 adapter enforces realpath-root confinement plus per-file, aggregate-byte, and
 duration limits. Its ignored local report contains only case IDs, contract
 status, metrics, reasons, and digests; fixture contents and external paths are
-not included.
+not included. The command exits nonzero if any locally applicable contract
+reports `fail`; `not-applicable` is reserved for unavailable live execution
+after local integrity succeeds.
 
 `ExternalJsonContractAdapter` runs a configured executable with:
 

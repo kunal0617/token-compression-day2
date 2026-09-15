@@ -42,7 +42,6 @@ export interface HostedHelperSession {
 }
 
 export interface HostedHelperClient {
-  readonly configurationDigest: string;
   start(): Promise<void>;
   createSession(config: Readonly<Record<string, unknown>>): Promise<HostedHelperSession>;
   stop(): Promise<Error[]>;
@@ -55,9 +54,14 @@ export interface HostedHelperClientConfiguration {
   readonly useLoggedInUser: true;
 }
 
-export type HostedHelperClientFactory = (
-  configuration: HostedHelperClientConfiguration
-) => Promise<HostedHelperClient>;
+export interface HostedHelperSdkModule {
+  readonly CopilotClient: new (
+    configuration: HostedHelperClientConfiguration
+  ) => HostedHelperClient;
+}
+
+export type HostedHelperSdkLoader =
+  () => Promise<HostedHelperSdkModule>;
 
 export class HostedCopilotHelperTransport implements IsolatedHelperTransport {
   readonly metadata = metadata(
@@ -65,10 +69,10 @@ export class HostedCopilotHelperTransport implements IsolatedHelperTransport {
     "1.0.0",
     ["empty-mode", "new-session", "no-tools", "no-files", "abort-on-timeout"]
   );
-  readonly #factory: HostedHelperClientFactory;
+  readonly #loader: HostedHelperSdkLoader;
 
-  constructor(factory: HostedHelperClientFactory) {
-    this.#factory = factory;
+  constructor(loader: HostedHelperSdkLoader) {
+    this.#loader = loader;
   }
 
   async complete(
@@ -98,18 +102,13 @@ export class HostedCopilotHelperTransport implements IsolatedHelperTransport {
       baseDirectory,
       useLoggedInUser: true
     };
-    const configurationDigest = canonicalJsonDigest(configuration);
     let client: HostedHelperClient | undefined;
     let session: HostedHelperSession | undefined;
     let timer: NodeJS.Timeout | undefined;
     let timedOut = false;
     try {
-      client = await this.#factory(configuration);
-      if (client.configurationDigest !== configurationDigest) {
-        throw new Error(
-          "Hosted helper client did not attest the required empty-mode configuration"
-        );
-      }
+      const sdk = await this.#loader();
+      client = new sdk.CopilotClient(configuration);
       await client.start();
       session = await client.createSession({
         clientName: "context-overflow-helper",

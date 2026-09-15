@@ -8,7 +8,9 @@ import { canonicalJsonDigest } from "../../src/core/canonical.js";
 import { IsolatedGapSuggestionHelper } from "../../src/helper/isolation.js";
 import {
   HostedCopilotHelperTransport,
-  LocalOpenAiCompatibleHelperTransport
+  LocalOpenAiCompatibleHelperTransport,
+  type HostedHelperClientConfiguration,
+  type HostedHelperSdkModule
 } from "../../src/helper/transports.js";
 import {
   assessSecurity,
@@ -191,8 +193,10 @@ describe("isolated additive-only evidence helper", () => {
 
   it("aborts an isolated hosted helper session on timeout", async () => {
     let aborted = false;
-    const transport = new HostedCopilotHelperTransport(async (configuration) => ({
-      configurationDigest: canonicalJsonDigest(configuration),
+    let appliedConfiguration:
+      | HostedHelperClientConfiguration
+      | undefined;
+    const client = {
       start: async () => undefined,
       createSession: async () => ({
         sendAndWait: async () => new Promise(() => undefined),
@@ -202,6 +206,14 @@ describe("isolated additive-only evidence helper", () => {
         disconnect: async () => undefined
       }),
       stop: async () => []
+    };
+    const transport = new HostedCopilotHelperTransport(async () => ({
+      CopilotClient: function (
+        configuration: HostedHelperClientConfiguration
+      ) {
+        appliedConfiguration = configuration;
+        return client;
+      } as unknown as HostedHelperSdkModule["CopilotClient"]
     }));
     const prompt = "prompt";
     const bytes = Buffer.from(prompt, "utf8");
@@ -228,41 +240,13 @@ describe("isolated additive-only evidence helper", () => {
       })
     ).rejects.toThrow();
     expect(aborted).toBe(true);
-  });
-
-  it("rejects a hosted helper client that does not attest empty mode", async () => {
-    const transport = new HostedCopilotHelperTransport(async () => ({
-      configurationDigest: canonicalJsonDigest("wrong"),
-      start: async () => undefined,
-      createSession: async () => {
-        throw new Error("must not create a session");
-      },
-      stop: async () => []
-    }));
-    const prompt = "prompt";
-    const bytes = Buffer.from(prompt, "utf8");
-    const assessedSource = {
-      sourceId: "helper-prompt",
-      bytes,
-      trustClass: "external-untrusted" as const
-    };
-    const assessment = assessSecurity([assessedSource]);
-    const authorization = authorizeExternalSend({
-      payload: bytes,
-      assessment,
-      explicitApproval: true,
-      assessedSource
+    expect(appliedConfiguration).toMatchObject({
+      mode: "empty",
+      useLoggedInUser: true
     });
-    expect(authorization.ok).toBe(true);
-    if (!authorization.ok) return;
-    await expect(
-      transport.complete(prompt, 100, {
-        networkApproved: true,
-        assessment,
-        authorization: authorization.value,
-        assessedSource
-      })
-    ).rejects.toThrow(/attest/i);
+    expect(appliedConfiguration?.workingDirectory).toBe(
+      appliedConfiguration?.baseDirectory
+    );
   });
 
   it("rejects suggestions for obligations already satisfied in the shown snapshot", async () => {

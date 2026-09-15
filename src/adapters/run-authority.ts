@@ -1,6 +1,7 @@
 import type {
   EvidenceFact,
-  EvidenceObligationSpec
+  EvidenceObligationSpec,
+  EvidenceRetrievalReceipt
 } from "../contracts/obligations.js";
 import type {
   AgentReadScope,
@@ -150,6 +151,7 @@ export class CommittedRunScopeAuthority
   #validateEvidenceCompletion(input: {
     readonly artifacts: readonly ArtifactSnapshot[];
     readonly evidence: readonly EvidenceSpan[];
+    readonly retrievalReceipts: readonly EvidenceRetrievalReceipt[];
     readonly approved: Omit<ApprovedReviewPayload, "authorityToken">;
     readonly trustedRetrievalProducers: readonly ProducerMetadata[];
   }): Result<"ready" | "gather-more-evidence"> {
@@ -165,7 +167,8 @@ export class CommittedRunScopeAuthority
         ),
         additionalFacts: facts,
         trustedRetrievalProducers:
-          input.trustedRetrievalProducers
+          input.trustedRetrievalProducers,
+        retrievalReceipts: input.retrievalReceipts
       });
       if (!assessed.ok) return assessed;
       if (
@@ -198,7 +201,8 @@ export class CommittedRunScopeAuthority
           fact,
           spec,
           evidence,
-          input.trustedRetrievalProducers
+          input.trustedRetrievalProducers,
+          input.retrievalReceipts
         )
       ) {
         return failure(
@@ -239,6 +243,9 @@ export class CommittedRunScopeAuthority
     });
     if (!approval.ok) return approval;
     const manifest = verified.value.manifest;
+    const retrievalReceipts =
+      this.#store.loadEvidenceRetrievalReceipts(input.runId);
+    if (!retrievalReceipts.ok) return retrievalReceipts;
     const subject = input.approved.subject;
     const expectedSources = manifest.artifacts
       .map((artifact) => ({
@@ -264,11 +271,12 @@ export class CommittedRunScopeAuthority
         ? verified.value.preparedBytes
         : subject.payloadRole === "captured"
           ? originalBytes
-          : input.approved.bytes;
+          : undefined;
     const committedPayloadRole =
       subject.payloadRole === "prepared" ||
       subject.payloadRole === "captured";
     if (
+      expectedPayload === undefined ||
       !expectedPayload.equals(input.approved.bytes) ||
       (committedPayloadRole &&
         canonicalJsonDigest(subject.sourceIdentities) !==
@@ -296,7 +304,8 @@ export class CommittedRunScopeAuthority
       evidence: manifest.evidence,
       approved: input.approved,
       trustedRetrievalProducers:
-        this.#trustedRetrievalProducers
+        this.#trustedRetrievalProducers,
+      retrievalReceipts: retrievalReceipts.value
     });
     if (
       !evidence.ok ||
@@ -334,9 +343,13 @@ export class CommittedRunScopeAuthority
       input.approved.subject.evidenceDecision === "ready" &&
       facts.length > 0
     ) {
+      const receipts =
+        this.#store.loadEvidenceRetrievalReceipts(input.runId);
+      if (!receipts.ok) return receipts;
       const completed = this.#store.saveEvidenceCompletion(
         input.runId,
-        validated.value.factsDigest
+        validated.value.factsDigest,
+        canonicalJsonDigest(receipts.value)
       );
       if (!completed.ok) return completed;
     }
@@ -355,13 +368,6 @@ export class CommittedRunScopeAuthority
       approval: request.approved.approval,
       evidenceFacts: request.approved.evidenceFacts
     };
-    const trustedRetrievalProducers = orderedFacts(
-      request.approved.evidenceFacts
-    ).flatMap((fact) =>
-      fact.retrievalBinding === undefined
-        ? []
-        : [fact.retrievalBinding.adapter]
-    );
     const validated = this.#validateReview({
       runId: request.runId,
       approved,

@@ -32,5 +32,11 @@ export interface ValidationStore {
   inspectReceipt(runId: string): Result<ContextReceipt>;
   loadEvidenceCompletion?(
     runId: string
-  ): Result<{ readonly factsDigest: string } | undefined>;
+  ): Result<
+    | {
+        readonly factsDigest: string;
+        readonly receiptsDigest: string;
+      }
+    | undefined
+  >;
 }

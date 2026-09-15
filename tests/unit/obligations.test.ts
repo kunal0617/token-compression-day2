@@ -224,7 +224,9 @@ describe("CQ-03/CQ-06 evidence obligations", () => {
     );
     expect(valid.ok).toBe(true);
     if (!valid.ok) return;
-    expect(valid.value[0]?.retrievalBinding?.adapter.producerId).toBe(
+    expect(
+      valid.value.facts[0]?.retrievalBinding?.adapter.producerId
+    ).toBe(
       "source-read"
     );
     const retrievalSpec = spec("one", "source", {
@@ -238,10 +240,11 @@ describe("CQ-03/CQ-06 evidence obligations", () => {
     expect(
       evidenceObligationEvaluator.evaluate(
         [retrievalSpec],
-        valid.value,
+        valid.value.facts,
         new Date(),
         [],
-        [adapter.metadata]
+        [adapter.metadata],
+        valid.value.receipts
       ).decision
     ).toBe("ready");
     expect(
@@ -265,6 +268,38 @@ describe("CQ-03/CQ-06 evidence obligations", () => {
         new Date(),
         [],
         [adapter.metadata]
+      ).decision
+    ).toBe("gather-more-evidence");
+    const validFact = valid.value.facts[0];
+    expect(validFact).toBeDefined();
+    if (validFact === undefined) return;
+    const forged = createEvidenceFact({
+      obligationId: validFact.obligationId,
+      kind: validFact.kind,
+      key: validFact.key,
+      value: "forged",
+      evidenceIds: ["forged"],
+      artifactId: validFact.artifactId,
+      startByte: 0,
+      endByte: 6,
+      sha256: sha256Base64Url(Buffer.from("forged", "utf8")),
+      byteLength: 6,
+      origin: "bounded-retrieval",
+      retrievalBinding: {
+        ...(validFact.retrievalBinding as NonNullable<
+          EvidenceFact["retrievalBinding"]
+        >),
+        responseDigest: canonicalJsonDigest("forged response")
+      }
+    });
+    expect(
+      evidenceObligationEvaluator.evaluate(
+        [retrievalSpec],
+        [forged],
+        new Date(),
+        [],
+        [adapter.metadata],
+        valid.value.receipts
       ).decision
     ).toBe("gather-more-evidence");
 

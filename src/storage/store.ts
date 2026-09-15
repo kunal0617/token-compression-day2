@@ -11,7 +11,10 @@ import {
 import type {
   ProducerMetadata,
 } from "../contracts/providers.js";
-import type { EvidenceFact } from "../contracts/obligations.js";
+import type {
+  EvidenceFact,
+  EvidenceRetrievalReceipt
+} from "../contracts/obligations.js";
 import type {
   ArtifactClassification,
   ArtifactSnapshot,
@@ -275,9 +278,19 @@ export class ContextStore {
         FOREIGN KEY(run_id) REFERENCES runs(run_id) ON DELETE CASCADE
       ) STRICT;
 
+      CREATE TABLE IF NOT EXISTS evidence_retrieval_receipts (
+        run_id TEXT NOT NULL,
+        receipt_id TEXT NOT NULL,
+        canonical_json TEXT NOT NULL,
+        digest TEXT NOT NULL,
+        PRIMARY KEY(run_id, receipt_id),
+        FOREIGN KEY(run_id) REFERENCES runs(run_id) ON DELETE CASCADE
+      ) STRICT;
+
       CREATE TABLE IF NOT EXISTS evidence_completions (
         run_id TEXT PRIMARY KEY,
         facts_digest TEXT NOT NULL,
+        receipts_digest TEXT,
         completed_at TEXT NOT NULL,
         FOREIGN KEY(run_id) REFERENCES runs(run_id) ON DELETE CASCADE
       ) STRICT;
@@ -299,6 +312,18 @@ export class ContextStore {
       .all() as unknown as { name: string }[];
     if (!runColumns.some((column) => column.name === "receipt_hash")) {
       this.#database.exec("ALTER TABLE runs ADD COLUMN receipt_hash TEXT");
+    }
+    const completionColumns = this.#database
+      .prepare("PRAGMA table_info(evidence_completions)")
+      .all() as unknown as { name: string }[];
+    if (
+      !completionColumns.some(
+        (column) => column.name === "receipts_digest"
+      )
+    ) {
+      this.#database.exec(
+        "ALTER TABLE evidence_completions ADD COLUMN receipts_digest TEXT"
+      );
     }
     this.#backfillReceiptHashes();
   }
@@ -1000,12 +1025,122 @@ export class ContextStore {
     }
   }
 
-  saveEvidenceCompletion(
+  loadEvidenceRetrievalReceipts(
+    runId: string
+  ): Result<readonly EvidenceRetrievalReceipt[]> {
+    try {
+      const rows = this.#database
+        .prepare(
+          `SELECT e.canonical_json, e.digest
+           FROM evidence_retrieval_receipts e
+           JOIN runs r ON r.run_id=e.run_id
+           WHERE e.run_id=? AND r.status='committed'
+             AND r.validation_status='validated'
+           ORDER BY e.receipt_id COLLATE BINARY`
+        )
+        .all(runId) as unknown as {
+        canonical_json: string;
+        digest: string;
+      }[];
+      const receipts: EvidenceRetrievalReceipt[] = [];
+      for (const row of rows) {
+        const parsed = JSON.parse(
+          row.canonical_json
+        ) as EvidenceRetrievalReceipt;
+        const { digest, ...unsigned } = parsed;
+        if (
+          canonicalJson(parsed) !== row.canonical_json ||
+          row.digest !==
+            sha256Base64Url(
+              Buffer.from(row.canonical_json, "utf8")
+            ) ||
+          digest !== canonicalJsonDigest(unsigned) ||
+          typeof parsed.receiptId !== "string" ||
+          !Array.isArray(parsed.factDigests)
+        ) {
+          return failure(
+            "INTEGRITY_ERROR",
+            "Persisted evidence retrieval receipt is invalid",
+            { runId }
+          );
+        }
+        receipts.push(parsed);
+      }
+      return success(receipts);
+    } catch (error) {
+      return failure(
+        "STORAGE_ERROR",
+        "Unable to load evidence retrieval receipts",
+        { runId, cause: errorMessage(error) }
+      );
+    }
+  }
+
+  saveEvidenceRetrievalReceipts(
     runId: string,
-    factsDigest: string
+    receipts: readonly EvidenceRetrievalReceipt[]
   ): Result<void> {
     try {
-      if (!/^[A-Za-z0-9_-]{43}$/.test(factsDigest)) {
+      this.#database.exec("BEGIN IMMEDIATE");
+      const run = this.#database
+        .prepare(
+          `SELECT run_id FROM runs
+           WHERE run_id=? AND status='committed'
+             AND validation_status='validated'`
+        )
+        .get(runId);
+      if (run === undefined) {
+        throw new Error(
+          "Retrieval receipts require a committed validated run"
+        );
+      }
+      for (const receipt of receipts) {
+        const { digest, ...unsigned } = receipt;
+        if (digest !== canonicalJsonDigest(unsigned)) {
+          throw new Error(
+            `Invalid evidence retrieval receipt ${receipt.receiptId}`
+          );
+        }
+        const json = canonicalJson(receipt);
+        this.#database
+          .prepare(
+            `INSERT INTO evidence_retrieval_receipts(
+              run_id, receipt_id, canonical_json, digest
+            ) VALUES (?, ?, ?, ?)`
+          )
+          .run(
+            runId,
+            receipt.receiptId,
+            json,
+            sha256Base64Url(Buffer.from(json, "utf8"))
+          );
+      }
+      this.#database.exec("COMMIT");
+      return success(undefined);
+    } catch (error) {
+      try {
+        this.#database.exec("ROLLBACK");
+      } catch {
+        // SQLite reports no active transaction after an automatic rollback.
+      }
+      return failure(
+        "STORAGE_ERROR",
+        "Unable to save evidence retrieval receipts",
+        { runId, cause: errorMessage(error) }
+      );
+    }
+  }
+
+  saveEvidenceCompletion(
+    runId: string,
+    factsDigest: string,
+    receiptsDigest: string
+  ): Result<void> {
+    try {
+      if (
+        !/^[A-Za-z0-9_-]{43}$/.test(factsDigest) ||
+        !/^[A-Za-z0-9_-]{43}$/.test(receiptsDigest)
+      ) {
         return failure(
           "INVALID_ARGUMENT",
           "Evidence completion digest is invalid"
@@ -1019,16 +1154,31 @@ export class ContextStore {
           "Evidence completion does not match persisted review facts"
         );
       }
+      const receipts = this.loadEvidenceRetrievalReceipts(runId);
+      if (
+        !receipts.ok ||
+        canonicalJsonDigest(receipts.value) !== receiptsDigest
+      ) {
+        throw new Error(
+          "Evidence completion does not match persisted retrieval receipts"
+        );
+      }
       this.#database
         .prepare(
           `INSERT INTO evidence_completions(
-            run_id, facts_digest, completed_at
-          ) VALUES (?, ?, ?)
+            run_id, facts_digest, receipts_digest, completed_at
+          ) VALUES (?, ?, ?, ?)
           ON CONFLICT(run_id) DO UPDATE SET
             facts_digest=excluded.facts_digest,
+            receipts_digest=excluded.receipts_digest,
             completed_at=excluded.completed_at`
         )
-        .run(runId, factsDigest, new Date().toISOString());
+        .run(
+          runId,
+          factsDigest,
+          receiptsDigest,
+          new Date().toISOString()
+        );
       this.#database.exec("COMMIT");
       return success(undefined);
     } catch (error) {
@@ -1047,22 +1197,37 @@ export class ContextStore {
 
   loadEvidenceCompletion(
     runId: string
-  ): Result<{ readonly factsDigest: string } | undefined> {
+  ): Result<
+    | {
+        readonly factsDigest: string;
+        readonly receiptsDigest: string;
+      }
+    | undefined
+  > {
     try {
       const row = this.#database
         .prepare(
-          `SELECT c.facts_digest
+          `SELECT c.facts_digest, c.receipts_digest
            FROM evidence_completions c
            JOIN runs r ON r.run_id=c.run_id
            WHERE c.run_id=? AND r.status='committed'
              AND r.validation_status='validated'`
         )
-        .get(runId) as { facts_digest: string } | undefined;
+        .get(runId) as
+        | {
+            facts_digest: string;
+            receipts_digest: string | null;
+          }
+        | undefined;
       if (row === undefined) return success(undefined);
       const facts = this.loadReviewFacts(runId);
+      const receipts = this.loadEvidenceRetrievalReceipts(runId);
       if (
         !facts.ok ||
-        canonicalJsonDigest(facts.value) !== row.facts_digest
+        !receipts.ok ||
+        row.receipts_digest === null ||
+        canonicalJsonDigest(facts.value) !== row.facts_digest ||
+        canonicalJsonDigest(receipts.value) !== row.receipts_digest
       ) {
         return failure(
           "INTEGRITY_ERROR",
@@ -1070,7 +1235,10 @@ export class ContextStore {
           { runId }
         );
       }
-      return success({ factsDigest: row.facts_digest });
+      return success({
+        factsDigest: row.facts_digest,
+        receiptsDigest: row.receipts_digest
+      });
     } catch (error) {
       return failure(
         "STORAGE_ERROR",

@@ -24,7 +24,7 @@ import {
   benchmarkPathFromRelative,
   relativeToBenchmarkRoot,
   resolveInside,
-  writeNewBytes
+  writeBytesAtomic
 } from "./io.js";
 
 function mean(values: readonly number[]): number {
@@ -264,6 +264,7 @@ function modelReport(
     pairs.set(key, pair);
   }
   const differences: number[] = [];
+  let completePairCount = 0;
   let preparedWins = 0;
   let originalWins = 0;
   let ties = 0;
@@ -274,6 +275,7 @@ function modelReport(
     ) {
       continue;
     }
+    completePairCount += 1;
     const difference =
       composite(pair.prepared) - composite(pair.original);
     differences.push(difference);
@@ -295,17 +297,24 @@ function modelReport(
         ? 0
         : null
       : differenceMean / deviation;
+  const completePairsPerCase = new Map<string, number>();
+  for (const [key, pair] of pairs) {
+    if (
+      pair.original !== undefined &&
+      pair.prepared !== undefined
+    ) {
+      const caseId = key.slice(0, key.lastIndexOf(":"));
+      completePairsPerCase.set(
+        caseId,
+        (completePairsPerCase.get(caseId) ?? 0) + 1
+      );
+    }
+  }
+  const completePairedCaseCount = [
+    ...completePairsPerCase.values()
+  ].filter((count) => count >= 3).length;
   const reportingFloorMet =
-    state.manifest.trials >= 3 &&
-    new Set(
-      scores
-        .filter(
-          (value) =>
-            value.arm === "original" ||
-            value.arm === "prepared"
-        )
-        .map((value) => value.caseId)
-    ).size >= 3;
+    completePairedCaseCount >= 3;
   const terminalFailures = state.manifest.plans.filter((plan) => {
     const record = state.trials[plan.trialId];
     return (
@@ -319,6 +328,27 @@ function modelReport(
   return {
     modelId,
     scores,
+    trialStatusCounts: Object.fromEntries(
+      [
+        "pending",
+        "running",
+        "completed",
+        "failed",
+        "timeout",
+        "interrupted",
+        "blocked",
+        "not-applicable"
+      ].map((status) => [
+        status,
+        state.manifest.plans.filter(
+          (plan) =>
+            plan.modelId === modelId &&
+            state.trials[plan.trialId]?.status === status
+        ).length
+      ])
+    ) as BenchmarkModelReport["trialStatusCounts"],
+    completePairCount,
+    completePairedCaseCount,
     aaSelfAgreement: selfAgreement(state, modelId),
     originalMean: mean(original),
     preparedMean: mean(prepared),
@@ -344,6 +374,11 @@ function modelReport(
         ? []
         : [
             "Reporting floor requires at least three paired cases and three trials per arm"
+          ]),
+      ...(completePairCount === pairs.size
+        ? []
+        : [
+            `${pairs.size - completePairCount} A/B pair(s) were incomplete and excluded`
           ]),
       ...(terminalFailures === 0
         ? []
@@ -407,6 +442,23 @@ export function buildBenchmarkReport(
         )
       : state;
   }
+  if (
+    !["completed", "completed-with-failures"].includes(
+      state.value.status
+    ) ||
+    state.value.manifest.plans.some((plan) => {
+      const record = state.value?.trials[plan.trialId];
+      return (
+        record === undefined ||
+        ["pending", "running"].includes(record.status)
+      );
+    })
+  ) {
+    return failure(
+      "INVALID_ARGUMENT",
+      "Benchmark reports require a terminal run with every trial accounted for"
+    );
+  }
   const responses = validateResponseFiles(
     located.value,
     state.value
@@ -439,11 +491,47 @@ export function buildBenchmarkReport(
     ...new Set(
       state.value.manifest.plans
         .filter(
-          (plan) => plan.modelId !== "not-configured"
+          (plan) => !plan.helper
         )
         .map((plan) => plan.modelId)
     )
   ];
+  const helperPlans = state.value.manifest.plans.filter(
+    (plan) => plan.helper
+  );
+  const helperStatusCounts = Object.fromEntries(
+    [
+      "pending",
+      "running",
+      "completed",
+      "failed",
+      "timeout",
+      "interrupted",
+      "blocked",
+      "not-applicable"
+    ].map((status) => [
+      status,
+      helperPlans.filter(
+        (plan) =>
+          state.value?.trials[plan.trialId]?.status === status
+      ).length
+    ])
+  ) as NonNullable<BenchmarkReport["helper"]>["statusCounts"];
+  const deterministicAdvice = [
+    ...contracts.values()
+  ].flatMap((contract) =>
+    contract.deterministicAdvice === undefined
+      ? []
+      : [
+          {
+            caseId: contract.caseId,
+            digest: canonicalJsonDigest(
+              contract.deterministicAdvice
+            ),
+            advice: contract.deterministicAdvice
+          }
+        ]
+  );
   const unsigned = {
     formatVersion: 1 as const,
     benchmarkRunId: state.value.benchmarkRunId,
@@ -456,6 +544,26 @@ export function buildBenchmarkReport(
         contracts
       )
     ),
+    ...(helperPlans.length === 0
+      ? {}
+      : {
+          helper: {
+            ...(state.value.manifest.helperModelId === undefined
+              ? {}
+              : {
+                  modelId:
+                    state.value.manifest.helperModelId
+                }),
+            statusCounts: helperStatusCounts,
+            warnings:
+              state.value.manifest.helperModelId === undefined
+                ? [
+                    "Luna helper model was not configured; helper trials are not applicable"
+                  ]
+                : []
+          }
+        }),
+    deterministicAdvice,
     detailedRunPath: relativeToBenchmarkRoot(located.value),
     contentSafe: true as const
   };
@@ -508,6 +616,12 @@ export function benchmarkReportMarkdown(
         4
       )}, ${model.bootstrap95[1].toFixed(4)}]`,
       `- Discordance: prepared ${model.discordance.preparedWins}, original ${model.discordance.originalWins}, ties ${model.discordance.ties}`,
+      `- Trial statuses: ${Object.entries(
+        model.trialStatusCounts
+      )
+        .map(([status, count]) => `${status}=${count}`)
+        .join(", ")}`,
+      `- Complete A/B pairs: ${model.completePairCount} across ${model.completePairedCaseCount} floor-qualified cases`,
       `- Reporting floor: ${
         model.reportingFloorMet ? "met" : "not met"
       }`,
@@ -524,7 +638,11 @@ export function benchmarkReportMarkdown(
             3
           )} | ${value.citationRecall.toFixed(
             3
-          )} | ${value.abstentionScore} | ${value.inputTokens} | ${value.outputTokens} | ${value.modelLatencyMs.toFixed(
+          )} | ${value.abstentionScore} | ${displayMetric(
+            value.inputTokens
+          )} | ${displayMetric(
+            value.outputTokens
+          )} | ${value.modelLatencyMs.toFixed(
             1
           )} | ${value.tools} | ${value.permissions} |`
       ),
@@ -536,6 +654,33 @@ export function benchmarkReportMarkdown(
         ""
       );
     }
+    if (report.helper !== undefined) {
+      lines.push(
+        "## Optional helper",
+        "",
+        `- Model: ${report.helper.modelId ?? "not configured"}`,
+        `- Statuses: ${Object.entries(report.helper.statusCounts)
+          .map(([status, count]) => `${status}=${count}`)
+          .join(", ")}`,
+        ...report.helper.warnings.map(
+          (warning) => `- Warning: ${warning}`
+        ),
+        ""
+      );
+    }
+    if (report.deterministicAdvice.length > 0) {
+      lines.push(
+        "## Deterministic model advice",
+        "",
+        ...report.deterministicAdvice.map(
+          (item) =>
+            `- ${item.caseId}: \`${item.digest}\` ${JSON.stringify(
+              item.advice
+            )}`
+        ),
+        ""
+      );
+    }
   }
   return lines.join("\n");
 }
@@ -543,6 +688,10 @@ export function benchmarkReportMarkdown(
 function csvCell(value: string | number | null): string {
   const text = value === null ? "" : String(value);
   return `"${text.replaceAll("\"", "\"\"")}"`;
+}
+
+function displayMetric(value: number | null): string {
+  return value === null ? "N/A" : String(value);
 }
 
 export function benchmarkReportCsv(
@@ -630,19 +779,14 @@ export function writeBenchmarkReport(
   const extension =
     format === "markdown" ? "md" : format;
   const relativePath = `reports/shareable.${extension}`;
-  const existing = resolveInside(built.value.root, relativePath);
-  if (!existing.ok) return existing;
   try {
     const bytes = Buffer.from(`${content}\n`, "utf8");
-    const written = writeNewBytes(
+    const written = writeBytesAtomic(
       built.value.root,
       relativePath,
       bytes
     );
-    if (!written.ok) {
-      const current = readFileSync(existing.value);
-      if (!current.equals(bytes)) return written;
-    }
+    if (!written.ok) return written;
     return success({
       content,
       path: relativePath,

@@ -20,6 +20,9 @@
     "test:integration": "vitest run tests/integration tests/adversarial tests/crash tests/mutation tests/property",
     "test:parity": "vitest run tests/unit/provenance.test.ts tests/unit/failure-parsers.test.ts tests/unit/obligations.test.ts tests/unit/source-scope.test.ts tests/unit/approval.test.ts tests/integration/tui.test.ts tests/integration/external-manual-parity.test.ts tests/unit/copilot-sdk-adapter.test.ts tests/unit/model-fit.test.ts tests/unit/helper.test.ts tests/unit/security.test.ts tests/unit/evaluation.test.ts tests/migration/producer-registry.test.ts",
     "parity:external": "npm run build && node dist\\scripts\\external-manual-parity.js",
+    "benchmark:export": "npm run build && node dist\\src\\main.js benchmark export",
+    "benchmark:live": "npm run build && node dist\\src\\main.js benchmark live",
+    "benchmark:report": "npm run build && node dist\\src\\main.js benchmark report",
     "smoke:bin": "node scripts/smoke-bin.mjs",
     "smoke:copilot": "npm run build && node dist\\scripts\\copilot-sdk-smoke.js"
   },

@@ -3,6 +3,8 @@
 import { lstat, open, realpath, stat } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { createInterface } from "node:readline/promises";
+import { stdin as input, stdout as output } from "node:process";
 
 import { prepareContext } from "./pipeline/prepare.js";
 import { sha256Base64Url } from "./core/hash.js";
@@ -19,6 +21,10 @@ import {
 } from "./tui/review.js";
 import { LocalFileCurrentSourcePort } from "./tui/current-source.js";
 import { CommittedRunScopeAuthority } from "./adapters/run-authority.js";
+import { exportBenchmarkSuite } from "./benchmark/export.js";
+import { runBenchmarkLive } from "./benchmark/live.js";
+import { writeBenchmarkReport } from "./benchmark/report.js";
+import { canonicalJson } from "./core/canonical.js";
 
 export const HELP = `Context Overflow POC
 
@@ -29,6 +35,9 @@ Usage:
   context-overflow retrieve <handle> [--store <path>]
   context-overflow verify --run <run-id> [--store <path>]
   context-overflow review --run <run-id> [--store <path>] [--adapter <id>] [--session <id>] [--model <id>] [--cwd <path>] [--permissions <csv>]
+  context-overflow benchmark export --root <external-manual-root> --output <.context-overflow/path> [--cases <csv>]
+  context-overflow benchmark live --suite <dir> --models <csv> --trials <n> --output <.context-overflow/path> [--cases <csv>] [--helper-model <id>] [--dry-run | --live] [--approve-manifest <digest>]
+  context-overflow benchmark report --run <benchmark-run-id> --format <json|markdown|csv>
 
 Defaults:
   --store .context-overflow/context-overflow.sqlite
@@ -41,6 +50,7 @@ byte-identical reconstruction validation succeed.
 export interface CliIo {
   readonly stdout: (value: string | Uint8Array) => void;
   readonly stderr: (value: string | Uint8Array) => void;
+  readonly question?: (prompt: string) => Promise<string>;
 }
 
 interface ParsedArgs {
@@ -60,10 +70,18 @@ function parseArgs(args: readonly string[]): Result<ParsedArgs> {
       positionals.push(token);
       continue;
     }
+    if (["--live", "--dry-run"].includes(token)) {
+      const key = token.slice(2);
+      const existing = options.get(key) ?? [];
+      existing.push("true");
+      options.set(key, existing);
+      continue;
+    }
     const value = args[index + 1];
     if (value === undefined || value.startsWith("--")) {
       return failure("INVALID_ARGUMENT", `Missing value for ${token}`);
     }
+
     const key = token.slice(2);
     const existing = options.get(key) ?? [];
     existing.push(value);
@@ -90,6 +108,39 @@ function oneOption(
     return failure("INVALID_ARGUMENT", `Missing required option --${name}`);
   }
   return success(values[0]);
+}
+
+function csvOption(
+  parsed: ParsedArgs,
+  name: string,
+  required = false
+): Result<readonly string[] | undefined> {
+  const value = oneOption(parsed, name, required);
+  if (!value.ok) return value;
+  if (value.value === undefined) return success(undefined);
+  const values = value.value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return values.length > 0
+    ? success(values)
+    : failure(
+        "INVALID_ARGUMENT",
+        `--${name} must contain at least one value`
+      );
+}
+
+function flagOption(
+  parsed: ParsedArgs,
+  name: string
+): Result<boolean> {
+  const values = parsed.options.get(name) ?? [];
+  return values.length <= 1
+    ? success(values.length === 1)
+    : failure(
+        "INVALID_ARGUMENT",
+        `--${name} may appear only once`
+      );
 }
 
 function defaultStore(parsed: ParsedArgs): Result<string> {
@@ -706,6 +757,290 @@ function runVerify(parsed: ParsedArgs, io: CliIo): number {
   return 0;
 }
 
+async function benchmarkApprovalQuestion(
+  io: CliIo,
+  manifestDigest: string
+): Promise<string> {
+  if (io.question !== undefined) {
+    return io.question(
+      `Type replay manifest digest ${manifestDigest} to approve live calls: `
+    );
+  }
+  const terminal = createInterface({ input, output });
+  try {
+    return await terminal.question(
+      `Type replay manifest digest ${manifestDigest} to approve live calls: `
+    );
+  } finally {
+    terminal.close();
+  }
+}
+
+async function runBenchmarkExport(
+  parsed: ParsedArgs,
+  io: CliIo
+): Promise<number> {
+  const known = rejectUnknownOptions(parsed, [
+    "root",
+    "output",
+    "cases"
+  ]);
+  const root = oneOption(parsed, "root", true);
+  const outputPath = oneOption(parsed, "output", true);
+  const cases = csvOption(parsed, "cases");
+  if (
+    !known.ok ||
+    parsed.positionals.length !== 1 ||
+    !root.ok ||
+    !outputPath.ok ||
+    !cases.ok
+  ) {
+    const error = !known.ok
+      ? known.error
+      : !root.ok
+        ? root.error
+        : !outputPath.ok
+          ? outputPath.error
+          : !cases.ok
+            ? cases.error
+            : {
+                code: "INVALID_ARGUMENT" as const,
+                message:
+                  "benchmark export accepts no extra positional arguments"
+              };
+    io.stderr(`${error.code}: ${error.message}\n`);
+    return 2;
+  }
+  const result = await exportBenchmarkSuite({
+    externalRoot: root.value as string,
+    output: outputPath.value as string,
+    ...(cases.value === undefined ? {} : { cases: cases.value })
+  });
+  if (!result.ok) {
+    io.stderr(`${result.error.code}: ${result.error.message}\n`);
+    return 1;
+  }
+  writeJson(io, {
+    suiteId: result.value.suiteId,
+    suiteDigest: result.value.digest,
+    sourceRootDigest: result.value.sourceRootDigest,
+    selectedCases: result.value.selectedCases,
+    caseCount: result.value.cases.length,
+    output: resolve(outputPath.value as string)
+  });
+  return 0;
+}
+
+async function runBenchmarkLiveCommand(
+  parsed: ParsedArgs,
+  io: CliIo
+): Promise<number> {
+  const known = rejectUnknownOptions(parsed, [
+    "suite",
+    "models",
+    "trials",
+    "live",
+    "dry-run",
+    "output",
+    "cases",
+    "helper-model",
+    "approve-manifest"
+  ]);
+  const suite = oneOption(parsed, "suite", true);
+  const models = csvOption(parsed, "models", true);
+  const trials = positiveIntegerOption(parsed, "trials");
+  const outputPath = oneOption(parsed, "output", true);
+  const cases = csvOption(parsed, "cases");
+  const helperModel = oneOption(parsed, "helper-model");
+  const approval = oneOption(parsed, "approve-manifest");
+  const live = flagOption(parsed, "live");
+  const dryRun = flagOption(parsed, "dry-run");
+  const options = [
+    known,
+    suite,
+    models,
+    trials,
+    outputPath,
+    cases,
+    helperModel,
+    approval,
+    live,
+    dryRun
+  ];
+  const invalid = options.find((item) => !item.ok);
+  if (
+    invalid !== undefined ||
+    parsed.positionals.length !== 1 ||
+    (live.ok && dryRun.ok && live.value && dryRun.value)
+  ) {
+    const error =
+      invalid !== undefined && !invalid.ok
+        ? invalid.error
+        : {
+            code: "INVALID_ARGUMENT" as const,
+            message:
+              "benchmark live requires exactly one subcommand and cannot combine --live with --dry-run"
+          };
+    io.stderr(`${error.code}: ${error.message}\n`);
+    return 2;
+  }
+  const common = {
+    suitePath: suite.ok ? (suite.value as string) : "",
+    output: outputPath.ok ? (outputPath.value as string) : "",
+    models: models.ok
+      ? (models.value as readonly string[])
+      : [],
+    trials: trials.ok ? (trials.value ?? 3) : 3,
+    ...(cases.ok && cases.value !== undefined
+      ? { cases: cases.value }
+      : {}),
+    ...(helperModel.ok && helperModel.value !== undefined
+      ? { helperModelId: helperModel.value }
+      : {}),
+    liveFlag: live.ok && live.value,
+    environmentLiveOptIn:
+      process.env.CTXO_LIVE_EVALUATION === "1"
+  };
+  const planned = await runBenchmarkLive({
+    ...common,
+    dryRun: true
+  });
+  if (!planned.ok) {
+    io.stderr(`${planned.error.code}: ${planned.error.message}\n`);
+    return 1;
+  }
+  io.stdout(`${canonicalJson(planned.value.state.manifest)}\n`);
+  if (dryRun.ok && dryRun.value) {
+    writeJson(io, {
+      benchmarkRunId:
+        planned.value.state.benchmarkRunId,
+      manifestDigest:
+        planned.value.state.manifest.digest,
+      estimatedCallCount:
+        planned.value.state.manifest.estimatedCallCount,
+      status: "dry-run",
+      output: planned.value.outputRoot
+    });
+    return 0;
+  }
+  if (!common.liveFlag || !common.environmentLiveOptIn) {
+    io.stderr(
+      "INVALID_ARGUMENT: live benchmark requires --live and CTXO_LIVE_EVALUATION=1\n"
+    );
+    return 1;
+  }
+  let approvedDigest =
+    approval.ok ? approval.value : undefined;
+  if (approvedDigest === undefined) {
+    approvedDigest = (
+      await benchmarkApprovalQuestion(
+        io,
+        planned.value.state.manifest.digest
+      )
+    ).trim();
+  }
+  const executed = await runBenchmarkLive({
+    ...common,
+    dryRun: false,
+    approvedManifestDigest: approvedDigest
+  });
+  if (!executed.ok) {
+    io.stderr(
+      `${executed.error.code}: ${executed.error.message}\n`
+    );
+    return 1;
+  }
+  writeJson(io, {
+    benchmarkRunId:
+      executed.value.state.benchmarkRunId,
+    manifestDigest:
+      executed.value.state.manifest.digest,
+    status: executed.value.state.status,
+    estimatedCallCount:
+      executed.value.state.manifest.estimatedCallCount,
+    completedTrials: Object.keys(
+      executed.value.state.trials
+    ).length,
+    output: executed.value.outputRoot
+  });
+  return executed.value.state.status ===
+    "completed-with-failures"
+    ? 1
+    : 0;
+}
+
+function runBenchmarkReport(
+  parsed: ParsedArgs,
+  io: CliIo
+): number {
+  const known = rejectUnknownOptions(parsed, [
+    "run",
+    "format"
+  ]);
+  const run = oneOption(parsed, "run", true);
+  const format = oneOption(parsed, "format", true);
+  if (
+    !known.ok ||
+    !run.ok ||
+    !format.ok ||
+    parsed.positionals.length !== 1
+  ) {
+    const error = !known.ok
+      ? known.error
+      : !run.ok
+        ? run.error
+        : !format.ok
+          ? format.error
+          : {
+              code: "INVALID_ARGUMENT" as const,
+              message:
+                "benchmark report accepts no extra positional arguments"
+            };
+    io.stderr(`${error.code}: ${error.message}\n`);
+    return 2;
+  }
+  if (
+    !["json", "markdown", "csv"].includes(
+      format.value as string
+    )
+  ) {
+    io.stderr(
+      "INVALID_ARGUMENT: --format must be json, markdown, or csv\n"
+    );
+    return 2;
+  }
+  const report = writeBenchmarkReport(
+    run.value as string,
+    format.value as "json" | "markdown" | "csv"
+  );
+  if (!report.ok) {
+    io.stderr(`${report.error.code}: ${report.error.message}\n`);
+    return 1;
+  }
+  io.stdout(`${report.value.content}\n`);
+  return 0;
+}
+
+async function runBenchmark(
+  parsed: ParsedArgs,
+  io: CliIo
+): Promise<number> {
+  const subcommand = parsed.positionals[0];
+  if (subcommand === "export") {
+    return runBenchmarkExport(parsed, io);
+  }
+  if (subcommand === "live") {
+    return runBenchmarkLiveCommand(parsed, io);
+  }
+  if (subcommand === "report") {
+    return runBenchmarkReport(parsed, io);
+  }
+  io.stderr(
+    "INVALID_ARGUMENT: benchmark requires export, live, or report\n"
+  );
+  return 2;
+}
+
 export async function runCli(
   args: readonly string[],
   io: CliIo = {
@@ -733,6 +1068,8 @@ export async function runCli(
       return runVerify(parsed.value, io);
     case "review":
       return runReview(parsed.value, io);
+    case "benchmark":
+      return runBenchmark(parsed.value, io);
     default:
       io.stderr(`Unknown command: ${parsed.value.command ?? ""}\n\n${HELP}`);
       return 2;

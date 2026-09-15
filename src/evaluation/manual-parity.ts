@@ -18,6 +18,10 @@ import type {
 import type {
   EvaluationCase
 } from "../contracts/evaluation.js";
+import type {
+  BenchmarkCaseId,
+  BenchmarkCaseKind
+} from "../benchmark/contracts.js";
 import type { ProducerMetadata } from "../contracts/providers.js";
 import type {
   ApprovedSourceCandidate
@@ -122,6 +126,158 @@ const expectedFiles = [
   "mf03-reasoning/prompt.txt",
   "luna/prompt.txt"
 ] as const;
+
+const benchmarkDefinitions: Readonly<
+  Record<
+    BenchmarkCaseId,
+    {
+      readonly contract: string;
+      readonly kind: BenchmarkCaseKind;
+      readonly prompt: string;
+      readonly files: readonly string[];
+      readonly allowAbstention: boolean;
+    }
+  >
+> = {
+  cq01: {
+    contract: "CQ-01",
+    kind: "paired",
+    prompt:
+      "Identify the exact source occurrence and explain only facts supported by the supplied request and source.",
+    files: [
+      "cq01-source-match/request.txt",
+      "cq01-source-match/inventory-reconciler.ts"
+    ],
+    allowAbstention: false
+  },
+  cq02: {
+    contract: "CQ-02",
+    kind: "paired",
+    prompt:
+      "Diagnose the failures. Preserve distinct tests, expected and actual values, exception codes, stack locations, command, and exit status.",
+    files: ["cq02-diagnostics/request.txt"],
+    allowAbstention: false
+  },
+  "cq03-incomplete": {
+    contract: "CQ-03 incomplete",
+    kind: "deterministic-abstention",
+    prompt:
+      "Do not infer a root cause when required failure evidence is missing. State what evidence must be gathered.",
+    files: ["cq03-incomplete/request.txt"],
+    allowAbstention: true
+  },
+  "cq03-complete": {
+    contract: "CQ-03 complete",
+    kind: "paired",
+    prompt:
+      "Use the initial failure context and complete follow-up evidence to diagnose the supported root cause.",
+    files: [
+      "cq03-incomplete/request.txt",
+      "cq03-incomplete/complete-follow-up.txt"
+    ],
+    allowAbstention: false
+  },
+  cq04: {
+    contract: "CQ-04",
+    kind: "paired",
+    prompt:
+      "Analyze the repeated diagnostic context while preserving chronology and distinct failure evidence.",
+    files: ["cq04-repetition/request.txt"],
+    allowAbstention: false
+  },
+  cq05: {
+    contract: "CQ-05",
+    kind: "paired",
+    prompt:
+      "Identify the requested source scope, required definitions and types, and omit unrelated source.",
+    files: ["cq05-source-scope/request.txt"],
+    allowAbstention: false
+  },
+  "cq06-missing": {
+    contract: "CQ-06 missing fact",
+    kind: "deterministic-abstention",
+    prompt:
+      "Do not diagnose beyond the observed evidence. State that the required external fact is missing.",
+    files: [
+      "cq06-missing-fact/checkout-events.jsonl",
+      "cq06-missing-fact/missing-response.txt"
+    ],
+    allowAbstention: true
+  },
+  "cq06-observed": {
+    contract: "CQ-06 observed fact",
+    kind: "paired",
+    prompt:
+      "Diagnose using the observed response fact and cite the supported status, body, and correlation information.",
+    files: [
+      "cq06-missing-fact/checkout-events.jsonl",
+      "cq06-missing-fact/observed-response.txt",
+      "cq06-missing-fact/response-observation.json"
+    ],
+    allowAbstention: false
+  },
+  cq07: {
+    contract: "CQ-07",
+    kind: "paired",
+    prompt:
+      "Compare the captured and current source snapshots, explain material changes, and identify stale assumptions.",
+    files: [
+      "cq07-source-version/changed-config.txt",
+      "cq07-source-version/dispatch-worker.captured.json",
+      "cq07-source-version/dispatch-worker.current.json"
+    ],
+    allowAbstention: false
+  },
+  mf01: {
+    contract: "MF-01",
+    kind: "model-fit",
+    prompt: "Perform the exact operation described by the supplied task.",
+    files: ["mf01-exact-operation/prompt.txt"],
+    allowAbstention: false
+  },
+  mf02: {
+    contract: "MF-02",
+    kind: "model-fit",
+    prompt: "Perform the bounded routine task exactly as supplied.",
+    files: ["mf02-routine/prompt.txt"],
+    allowAbstention: false
+  },
+  mf03: {
+    contract: "MF-03",
+    kind: "model-fit",
+    prompt:
+      "Perform the reasoning-intensive task using only the supplied evidence.",
+    files: ["mf03-reasoning/prompt.txt"],
+    allowAbstention: false
+  },
+  luna: {
+    contract: "Luna-style",
+    kind: "helper",
+    prompt:
+      "Return only bounded evidence-gap suggestions for the supplied task.",
+    files: ["luna/prompt.txt"],
+    allowAbstention: true
+  }
+};
+
+export interface ManualBenchmarkInput {
+  readonly caseId: BenchmarkCaseId;
+  readonly contract: string;
+  readonly kind: BenchmarkCaseKind;
+  readonly prompt: string;
+  readonly allowAbstention: boolean;
+  readonly artifacts: readonly {
+    readonly label: string;
+    readonly bytes: Buffer;
+    readonly sha256: string;
+    readonly byteLength: number;
+  }[];
+  readonly inputDigest: string;
+}
+
+export const manualBenchmarkCaseIds = Object.freeze(
+  Object.keys(benchmarkDefinitions) as BenchmarkCaseId[]
+);
 
 function producer(): ProducerMetadata {
   const producerId =
@@ -284,6 +440,44 @@ export class ExternalManualParityAdapter {
       });
     }
     return success(canonicalJsonDigest(identities));
+  }
+
+  loadBenchmarkInput(
+    caseId: BenchmarkCaseId
+  ): Result<ManualBenchmarkInput> {
+    const definition = benchmarkDefinitions[caseId];
+    if (definition === undefined) {
+      return failure(
+        "INVALID_ARGUMENT",
+        "Unknown manual benchmark case"
+      );
+    }
+    const artifacts = [];
+    for (const path of definition.files) {
+      const bytes = this.#read(path);
+      if (!bytes.ok) return bytes;
+      artifacts.push({
+        label: path.replaceAll("\\", "/"),
+        bytes: bytes.value,
+        sha256: sha256Base64Url(bytes.value),
+        byteLength: bytes.value.length
+      });
+    }
+    return success({
+      caseId,
+      contract: definition.contract,
+      kind: definition.kind,
+      prompt: definition.prompt,
+      allowAbstention: definition.allowAbstention,
+      artifacts,
+      inputDigest: canonicalJsonDigest(
+        artifacts.map((artifact) => ({
+          label: artifact.label,
+          sha256: artifact.sha256,
+          byteLength: artifact.byteLength
+        }))
+      )
+    });
   }
 
   async #cq01(): Promise<ManualParityCaseResult> {

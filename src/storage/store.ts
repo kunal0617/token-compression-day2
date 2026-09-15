@@ -13,6 +13,9 @@ import type {
 } from "../contracts/providers.js";
 import type {
   EvidenceFact,
+  EvidenceRetrievalAdapter,
+  EvidenceRetrievalExecution,
+  EvidenceRetrievalRequest,
   EvidenceRetrievalReceipt
 } from "../contracts/obligations.js";
 import type {
@@ -36,6 +39,7 @@ import { failure, success, type Result } from "../core/result.js";
 import { buildReceipt } from "../receipt/receipt.js";
 import { parseHandle } from "./handles.js";
 import { validateContextPackage } from "../validate/validate.js";
+import { executeBoundedRetrieval } from "../obligations/evaluate.js";
 
 export interface StoreCommitInput {
   readonly runId: string;
@@ -1076,7 +1080,7 @@ export class ContextStore {
     }
   }
 
-  saveEvidenceRetrievalReceipts(
+  #saveEvidenceRetrievalReceipts(
     runId: string,
     receipts: readonly EvidenceRetrievalReceipt[]
   ): Result<void> {
@@ -1094,6 +1098,7 @@ export class ContextStore {
           "Retrieval receipts require a committed validated run"
         );
       }
+
       for (const receipt of receipts) {
         const { digest, ...unsigned } = receipt;
         if (digest !== canonicalJsonDigest(unsigned)) {
@@ -1129,6 +1134,23 @@ export class ContextStore {
         { runId, cause: errorMessage(error) }
       );
     }
+  }
+
+  async executeEvidenceRetrieval(
+    runId: string,
+    requests: readonly EvidenceRetrievalRequest[],
+    adapters: ReadonlyMap<string, EvidenceRetrievalAdapter>
+  ): Promise<Result<EvidenceRetrievalExecution>> {
+    const executed = await executeBoundedRetrieval(
+      requests,
+      adapters
+    );
+    if (!executed.ok) return executed;
+    const saved = this.#saveEvidenceRetrievalReceipts(
+      runId,
+      executed.value.receipts
+    );
+    return saved.ok ? executed : saved;
   }
 
   saveEvidenceCompletion(

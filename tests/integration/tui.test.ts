@@ -241,6 +241,7 @@ describe("terminal-first review TUI", () => {
   });
 
   it("persists gathered facts and re-evaluates gaps before approval", async () => {
+    let retrievalCalls = 0;
     let expectedGap:
       | ReturnType<TerminalReviewController["view"]>["gaps"][number]
       | undefined;
@@ -254,6 +255,7 @@ describe("terminal-first review TUI", () => {
         )
       },
       retrieve: async (request) => {
+        retrievalCalls += 1;
         if (expectedGap === undefined) {
           throw new Error("Expected gap was not selected");
         }
@@ -301,6 +303,10 @@ describe("terminal-first review TUI", () => {
       if (gap === undefined) return;
       expectedGap = gap;
       expect((await value.controller.gatherEvidence()).ok).toBe(true);
+      expect(retrievalCalls).toBe(1);
+      expect(
+        "saveEvidenceRetrievalReceipts" in value.store
+      ).toBe(false);
       expect(value.controller.view().gaps).toHaveLength(0);
       expect(
         value.controller.dispatch({ type: "approve-prepared" }).ok

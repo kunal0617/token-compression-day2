@@ -12,6 +12,9 @@ import type { ApprovalRecord, ReviewSubject } from "../contracts/approval.js";
 import type { EvidenceObligation } from "../contracts/providers.js";
 import type {
   EvidenceFact,
+  EvidenceRetrievalAdapter,
+  EvidenceRetrievalExecution,
+  EvidenceRetrievalRequest,
   EvidenceRetrievalReceipt
 } from "../contracts/obligations.js";
 import type { SourceSnapshotIdentity } from "../contracts/provenance.js";
@@ -25,10 +28,7 @@ import {
   selectSnapshot,
   validateApproval
 } from "../approval/review.js";
-import {
-  assessFailureEvidence,
-  executeBoundedRetrieval
-} from "../obligations/evaluate.js";
+import { assessFailureEvidence } from "../obligations/evaluate.js";
 import { builtinRuntime } from "../registry/builtins.js";
 import { assessSecurity } from "../security/security.js";
 
@@ -42,10 +42,11 @@ export interface ReviewRetrievalPort {
   loadEvidenceRetrievalReceipts?(
     runId: string
   ): Result<readonly EvidenceRetrievalReceipt[]>;
-  saveEvidenceRetrievalReceipts?(
+  executeEvidenceRetrieval?(
     runId: string,
-    receipts: readonly EvidenceRetrievalReceipt[]
-  ): Result<void>;
+    requests: readonly EvidenceRetrievalRequest[],
+    adapters: ReadonlyMap<string, EvidenceRetrievalAdapter>
+  ): Promise<Result<EvidenceRetrievalExecution>>;
 }
 
 function sourceDiff(input: TerminalReviewInput): readonly string[] {
@@ -432,19 +433,19 @@ export class TerminalReviewController {
         "No unresolved obligation has a bounded retrieval request"
       );
     }
-    const retrieved = await executeBoundedRetrieval(
-      requests,
-      retrievalAdapters
-    );
-    if (!retrieved.ok) return retrieved;
-    const savedReceipts =
-      this.#retrieval.saveEvidenceRetrievalReceipts?.(
-        this.#input.contextPackage.runId,
-        retrieved.value.receipts
+    if (this.#retrieval.executeEvidenceRetrieval === undefined) {
+      return failure(
+        "INTEGRITY_ERROR",
+        "The retrieval store cannot issue authoritative execution receipts"
       );
-    if (savedReceipts !== undefined && !savedReceipts.ok) {
-      return savedReceipts;
     }
+    const retrieved =
+      await this.#retrieval.executeEvidenceRetrieval(
+        this.#input.contextPackage.runId,
+        requests,
+        retrievalAdapters
+      );
+    if (!retrieved.ok) return retrieved;
     this.#retrievalReceipts = [
       ...this.#retrievalReceipts,
       ...retrieved.value.receipts

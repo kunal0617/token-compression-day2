@@ -46,7 +46,8 @@
   cannot authorize a send.
 - Bounded retrieval results require a persisted opaque execution receipt that
   binds request, response, adapter, and returned-fact digests. Copying trusted
-  adapter metadata and recomputing public hashes is insufficient.
+  adapter metadata and recomputing public hashes is insufficient. Receipt
+  persistence is private to the store-owned method that invokes the adapter.
 - Live SDK authority is limited to committed prepared/captured bytes. Locally
   reviewed current/both/merged payloads cannot cross the SDK boundary without a
   future trusted capture/merge attestation.

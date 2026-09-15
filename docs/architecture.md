@@ -79,6 +79,8 @@ historical receipts fail explicitly.
 
 Gathered evidence is stored as facts linked to opaque retrieval-execution
 receipts that bind the request, complete response, adapter, and fact digests.
+SQLite invokes the configured adapter through a store-owned execution method;
+there is no public API for persisting a caller-constructed receipt.
 When the validated fact set satisfies every required obligation, SQLite records
 a separate immutable completion digest over both facts and receipts without
 rewriting the canonical run manifest. Review

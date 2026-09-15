@@ -114,13 +114,27 @@ class FakeClient implements SdkClientLike {
   readonly resumed: string[] = [];
   readonly session = new FakeSession("session-1");
   started = false;
+  stopped = false;
+  forceStopped = false;
+  stopPending = false;
+  forceStopPending = false;
+  listModelsPending = false;
 
   async start(): Promise<void> {
     this.started = true;
   }
 
   async stop(): Promise<Error[]> {
+    if (this.stopPending) return new Promise(() => undefined);
+    this.stopped = true;
     return [];
+  }
+
+  async forceStop(): Promise<void> {
+    if (this.forceStopPending) {
+      return new Promise(() => undefined);
+    }
+    this.forceStopped = true;
   }
 
   async createSession(
@@ -156,6 +170,9 @@ class FakeClient implements SdkClientLike {
   }
 
   async listModels() {
+    if (this.listModelsPending) {
+      return new Promise<never>(() => undefined);
+    }
     return [
       {
         id: "model-1",
@@ -203,7 +220,8 @@ function createAdapter(
   onTimeout?: (details: {
     runId: string;
     sessionId: string;
-  }) => Promise<void> | void
+  }) => Promise<void> | void,
+  catalogTimeoutMs?: number
 ): OptionalCopilotSdkAdapter {
   return new OptionalCopilotSdkAdapter(
     async () => fakeSdk(client, tools),
@@ -211,14 +229,15 @@ function createAdapter(
       issueReview: () => success("ctxo-approval:v1:test"),
       validate: () => success(undefined)
     },
-    cleanupTimeoutMs === undefined
-      ? onTimeout === undefined
+    {
+      ...(catalogTimeoutMs === undefined
         ? {}
-        : { onTimeout }
-      : {
-          cleanupTimeoutMs,
-          ...(onTimeout === undefined ? {} : { onTimeout })
-        }
+        : { catalogTimeoutMs }),
+      ...(cleanupTimeoutMs === undefined
+        ? {}
+        : { cleanupTimeoutMs }),
+      ...(onTimeout === undefined ? {} : { onTimeout })
+    }
   );
 }
 
@@ -427,6 +446,28 @@ describe("optional GitHub Copilot SDK adapter", () => {
     expect((await adapter.close()).ok).toBe(true);
   });
 
+  it("times out a hung model catalog and force-stops the owned runtime", async () => {
+    const client = new FakeClient();
+    client.listModelsPending = true;
+    const adapter = createAdapter(
+      client,
+      [],
+      10,
+      undefined,
+      10
+    );
+    const models = await adapter.listModels();
+    expect(models.ok).toBe(false);
+    if (!models.ok) {
+      expect(models.error.details).toMatchObject({
+        reason: "catalog-timeout",
+        cleanupConfirmed: true
+      });
+    }
+    expect(client.forceStopped).toBe(true);
+    expect((await adapter.close()).ok).toBe(true);
+  });
+
   it("applies and attests approved context and reasoning settings", async () => {
     const client = new FakeClient();
     client.session.emitUsage = true;
@@ -597,9 +638,25 @@ describe("optional GitHub Copilot SDK adapter", () => {
     expect(closed.ok).toBe(false);
     if (!closed.ok) {
       expect(closed.error.details).toMatchObject({
-        reason: "cleanup-timeout"
+        reason: "cleanup-timeout",
+        cleanupConfirmed: true
       });
     }
+    expect(closeClient.forceStopped).toBe(true);
+
+    const stopClient = new FakeClient();
+    stopClient.stopPending = true;
+    const stopAdapter = createAdapter(stopClient, [], 10);
+    expect((await stopAdapter.listModels()).ok).toBe(true);
+    const stopClosed = await stopAdapter.close();
+    expect(stopClosed.ok).toBe(false);
+    if (!stopClosed.ok) {
+      expect(stopClosed.error.details).toMatchObject({
+        reason: "cleanup-timeout",
+        cleanupConfirmed: true
+      });
+    }
+    expect(stopClient.forceStopped).toBe(true);
   });
 
   it("rejects changed payloads and cross-run scopes before SDK use", async () => {

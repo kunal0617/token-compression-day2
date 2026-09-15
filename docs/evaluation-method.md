@@ -63,10 +63,19 @@ prepared payload pairs, creates a canonical approval-bound call plan, executes
 fresh-session model trials with resumable terminal state, and emits content-safe
 per-model JSON/Markdown/CSV reports.
 
-Benchmark runtime identity includes the actual installed SDK entries, effective
-runtime wrapper and native module (including `COPILOT_CLI_PATH` overrides), and
-protocol implementation. The effective override path and complete selected
-implementation/runtime trees are represented only by digests. Provider token
+Benchmark runtime identity includes the deployed benchmark runner and Copilot
+adapter bytes, actual installed SDK entries, effective runtime wrapper and
+native module (including `COPILOT_CLI_PATH` overrides), libc-specific Linux
+runtime selection, and protocol implementation. The effective override path
+and complete selected implementation/runtime trees are represented only by
+digests. Provider token
 usage and provider-observed model IDs are reported only when emitted by the
 SDK; missing usage remains explicitly unavailable and prevents exact live-model
 attestation.
+
+Model latency ends when the attested response is received. The response,
+provider usage, session/model/settings identity, payload digest, and security
+assessment are persisted before SDK cleanup. Cleanup latency and health are
+reported separately; a bounded graceful-cleanup timeout uses the SDK-owned
+forced-stop path and remains a warning on an otherwise complete scoreable
+trial. Request/turn timeout still aborts and remains a failed timed-out trial.

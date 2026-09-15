@@ -173,7 +173,11 @@ function score(
     outputTokens: observation.outputTokens,
     decisions: observation.decisions,
     tools: observation.tools,
-    permissions: observation.permissions
+    permissions: observation.permissions,
+    cleanupStatus:
+      record.cleanupStatus ??
+      (record.sent ? "unknown" : "not-required"),
+    cleanupLatencyMs: record.cleanupLatencyMs ?? null
   };
 }
 
@@ -326,6 +330,34 @@ function modelReport(
       )
     );
   }).length;
+  const cleanupStatusCounts =
+    Object.fromEntries(
+      [
+        "not-required",
+        "pending",
+        "completed",
+        "timed-out",
+        "failed",
+        "unknown"
+      ].map((status) => [
+        status,
+        state.manifest.plans.filter((plan) => {
+          if (plan.modelId !== modelId || plan.helper) return false;
+          const record = state.trials[plan.trialId];
+          const cleanupStatus =
+            record?.cleanupStatus ??
+            (record?.sent === true
+              ? "unknown"
+              : "not-required");
+          return cleanupStatus === status;
+        }).length
+      ])
+    ) as BenchmarkModelReport["cleanupStatusCounts"];
+  const cleanupWarnings =
+    cleanupStatusCounts["timed-out"] +
+    cleanupStatusCounts.failed +
+    cleanupStatusCounts.pending +
+    cleanupStatusCounts.unknown;
   return {
     modelId,
     scores,
@@ -349,6 +381,7 @@ function modelReport(
         ).length
       ])
     ) as BenchmarkModelReport["trialStatusCounts"],
+    cleanupStatusCounts,
     completePairCount,
     completePairedCaseCount,
     aaSelfAgreement: selfAgreement(state, modelId),
@@ -386,6 +419,11 @@ function modelReport(
         ? []
         : [
             `${terminalFailures} trial(s) ended in failure, timeout, interruption, or security block`
+          ]),
+      ...(cleanupWarnings === 0
+        ? []
+        : [
+            `${cleanupWarnings} trial(s) have timed-out, failed, pending, or legacy-unknown cleanup health; completed response-attested trials remain scoreable`
           ])
     ]
   };
@@ -623,13 +661,18 @@ export function benchmarkReportMarkdown(
       )
         .map(([status, count]) => `${status}=${count}`)
         .join(", ")}`,
+      `- Cleanup statuses: ${Object.entries(
+        model.cleanupStatusCounts
+      )
+        .map(([status, count]) => `${status}=${count}`)
+        .join(", ")}`,
       `- Complete A/B pairs: ${model.completePairCount} across ${model.completePairedCaseCount} floor-qualified cases`,
       `- Reporting floor: ${
         model.reportingFloorMet ? "met" : "not met"
       }`,
       "",
-      "| Case | Arm | Trial | Success | Visible | Recoverable | Failures | Citations | Abstention | Input tokens | Output tokens | Model ms | Tools | Permissions |",
-      "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+      "| Case | Arm | Trial | Success | Visible | Recoverable | Failures | Citations | Abstention | Input tokens | Output tokens | Model ms | Cleanup | Cleanup ms | Tools | Permissions |",
+      "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|",
       ...model.scores.map(
         (value) =>
           `| ${value.caseId} | ${value.arm} | ${value.trialNumber} | ${value.taskSuccess} | ${value.visibleEvidenceRecall.toFixed(
@@ -646,6 +689,8 @@ export function benchmarkReportMarkdown(
             value.outputTokens
           )} | ${value.modelLatencyMs.toFixed(
             1
+          )} | ${value.cleanupStatus} | ${displayMetric(
+            value.cleanupLatencyMs
           )} | ${value.tools} | ${value.permissions} |`
       ),
       ""
@@ -687,8 +732,11 @@ export function benchmarkReportMarkdown(
   return lines.join("\n");
 }
 
-function csvCell(value: string | number | null): string {
-  const text = value === null ? "" : String(value);
+function csvCell(
+  value: string | number | boolean | null | undefined
+): string {
+  const text =
+    value === null || value === undefined ? "" : String(value);
   return `"${text.replaceAll("\"", "\"\"")}"`;
 }
 
@@ -701,6 +749,11 @@ export function benchmarkReportCsv(
 ): string {
   const header = [
     "record_type",
+    "benchmark_run_id",
+    "manifest_digest",
+    "suite_digest",
+    "report_digest",
+    "detailed_run_path",
     "model",
     "case",
     "arm",
@@ -725,63 +778,88 @@ export function benchmarkReportCsv(
     "model_latency_ms",
     "input_tokens",
     "output_tokens",
+    "cleanup_status",
+    "cleanup_latency_ms",
     "decisions",
     "tools",
     "permissions"
   ];
+  const provenance = {
+    benchmark_run_id: report.benchmarkRunId,
+    manifest_digest: report.manifestDigest,
+    suite_digest: report.suiteDigest,
+    report_digest: report.digest,
+    detailed_run_path: report.detailedRunPath
+  };
+  const row = (
+    values: Readonly<
+      Record<
+        string,
+        string | number | boolean | null | undefined
+      >
+    >
+  ): string =>
+    header
+      .map((column) => csvCell(values[column]))
+      .join(",");
   return [
     header.map(csvCell).join(","),
     ...report.models.flatMap((model) => [
       ...model.scores.map((value) =>
-        [
-          "score",
-          model.modelId,
-          value.caseId,
-          value.arm,
-          value.trialNumber,
-          "completed",
-          1,
-          "",
-          value.taskSuccess,
-          value.visibleEvidenceRecall,
-          value.recoverableEvidenceRecall,
-          value.distinctFailureRecall,
-          value.citationRecall,
-          value.unsupportedClaims,
-          value.contradictions,
-          value.abstentionScore,
-          value.retrievalTokens,
-          value.retrievalCalls,
-          value.retrievalLatencyMs,
-          value.preparationLatencyMs,
-          value.reviewLatencyMs,
-          value.handoffLatencyMs,
-          value.modelLatencyMs,
-          value.inputTokens,
-          value.outputTokens,
-          value.decisions,
-          value.tools,
-          value.permissions
-        ]
-          .map(csvCell)
-          .join(",")
+        row({
+          record_type: "score",
+          ...provenance,
+          model: model.modelId,
+          case: value.caseId,
+          arm: value.arm,
+          trial: value.trialNumber,
+          status: "completed",
+          count: 1,
+          task_success: value.taskSuccess,
+          visible_recall: value.visibleEvidenceRecall,
+          recoverable_recall: value.recoverableEvidenceRecall,
+          failure_recall: value.distinctFailureRecall,
+          citation_recall: value.citationRecall,
+          unsupported_claims: value.unsupportedClaims,
+          contradictions: value.contradictions,
+          abstention: value.abstentionScore,
+          retrieval_tokens: value.retrievalTokens,
+          retrieval_calls: value.retrievalCalls,
+          retrieval_latency_ms: value.retrievalLatencyMs,
+          preparation_latency_ms: value.preparationLatencyMs,
+          review_latency_ms: value.reviewLatencyMs,
+          handoff_latency_ms: value.handoffLatencyMs,
+          model_latency_ms: value.modelLatencyMs,
+          input_tokens: value.inputTokens,
+          output_tokens: value.outputTokens,
+          cleanup_status: value.cleanupStatus,
+          cleanup_latency_ms: value.cleanupLatencyMs,
+          decisions: value.decisions,
+          tools: value.tools,
+          permissions: value.permissions
+        })
       ),
       ...Object.entries(model.trialStatusCounts)
         .filter(([, count]) => count > 0)
         .map(([status, count]) =>
-          [
-            "terminal-status",
-            model.modelId,
-            "",
-            "",
-            "",
+          row({
+            record_type: "terminal-status",
+            ...provenance,
+            model: model.modelId,
             status,
-            count,
-            "",
-            ...Array.from({ length: 20 }, () => "")
-          ]
-            .map(csvCell)
-            .join(",")
+            count
+          })
+        ),
+      ...Object.entries(model.cleanupStatusCounts)
+        .filter(([, count]) => count > 0)
+        .map(([status, count]) =>
+          row({
+            record_type: "cleanup-status",
+            ...provenance,
+            model: model.modelId,
+            status,
+            count
+          })
         )
     ]),
     ...(report.helper === undefined
@@ -789,34 +867,26 @@ export function benchmarkReportCsv(
       : Object.entries(report.helper.statusCounts)
           .filter(([, count]) => count > 0)
           .map(([status, count]) =>
-            [
-              "helper-status",
-              report.helper?.modelId ?? "",
-              "luna",
-              "helper",
-              "",
+            row({
+              record_type: "helper-status",
+              ...provenance,
+              model: report.helper?.modelId,
+              case: "luna",
+              arm: "helper",
               status,
-              count,
-              "",
-              ...Array.from({ length: 20 }, () => "")
-            ]
-              .map(csvCell)
-              .join(",")
+              count
+            })
           )),
     ...report.deterministicAdvice.map((item) =>
-      [
-        "deterministic-advice",
-        "",
-        item.caseId,
-        "task",
-        "",
-        "recorded",
-        1,
-        item.digest,
-        ...Array.from({ length: 20 }, () => "")
-      ]
-        .map(csvCell)
-        .join(",")
+      row({
+        record_type: "deterministic-advice",
+        ...provenance,
+        case: item.caseId,
+        arm: "task",
+        status: "recorded",
+        count: 1,
+        advice_digest: item.digest
+      })
     )
   ].join("\n");
 }

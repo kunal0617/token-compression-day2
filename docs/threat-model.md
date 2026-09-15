@@ -53,6 +53,10 @@
   future trusted capture/merge attestation.
 - SDK operations are serialized so cached-session sends, event subscriptions,
   and permission/scope reconfiguration cannot overlap.
+- Benchmark responses and execution receipts are atomically persisted before
+  post-response teardown. Graceful cleanup timeout is kept as separate
+  resource-health evidence; the adapter then uses the SDK-owned force-stop
+  mechanism so an owned runtime cannot keep the benchmark CLI alive.
 - Benchmark suite/run/index roots are canonicalized against the workspace-owned
   `.context-overflow` directory. Junction/symlink anchors, parents, final paths,
   store/payload swaps, and temporary-file link attacks fail closed.

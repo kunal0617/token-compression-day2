@@ -73,8 +73,13 @@ permissions, and applied session settings.
 The exact model must be present and enabled in the live catalog. Permissions
 default to evidence/source/network only; shell and write are disabled. The
 runner rehashes payloads before each trial, scans outbound and response bytes,
-persists structured terminal timeout state, and bounds abort/disconnect/client
-cleanup separately. Resume compares the complete runtime configuration and
+persists structured request/turn timeout state, and bounds
+abort/disconnect/client cleanup separately. A fully attested assistant
+response and execution receipt are committed before teardown; post-response
+cleanup timeout is reported as resource-health metadata and does not erase or
+fail the completed trial. The adapter uses the SDK-owned `forceStop()` path
+when graceful cleanup exceeds its bound so the CLI can exit. Resume compares
+the complete runtime configuration and
 skips completed, failed, timed-out, blocked, and interrupted trials, preventing
 duplicate model calls.
 
@@ -112,7 +117,9 @@ means from complete A/B pairs only, and atomically replace prior generated
 formats. Expected/actual facts are parsed as role-scoped clauses with exact
 token boundaries; role inversion is scored as a contradiction. Markdown emits
 global helper/advice sections once, while CSV includes terminal statuses,
-helper N/A, and deterministic advice rows even when no score row exists.
+cleanup status/latency, helper N/A, and deterministic advice rows even when
+no score row exists. Every CSV row repeats the benchmark run, manifest,
+suite, report, and detailed-run provenance attestation.
 
 The shareable report contains no prompts or responses. It links only to the
 relative ignored run directory. Detailed responses remain local and are

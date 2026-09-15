@@ -42,6 +42,7 @@ export interface SdkSessionLike {
 export interface SdkClientLike {
   start(): Promise<void>;
   stop(): Promise<Error[]>;
+  forceStop(): Promise<void>;
   createSession(config: Readonly<Record<string, unknown>>): Promise<SdkSessionLike>;
   resumeSession(
     sessionId: string,
@@ -483,6 +484,7 @@ export class OptionalCopilotSdkAdapter {
   readonly metadata = metadata();
   readonly #loader: CopilotSdkLoader;
   readonly #authority: AgentRunScopeAuthority | undefined;
+  readonly #catalogTimeoutMs: number;
   readonly #cleanupTimeoutMs: number;
   readonly #onTimeout:
     | ((details: {
@@ -492,6 +494,7 @@ export class OptionalCopilotSdkAdapter {
     | undefined;
   #client: SdkClientLike | undefined;
   #clientWorkingDirectory: string | undefined;
+  #forceClosePromise: Promise<Result<void>> | undefined;
   #operationTail: Promise<void> = Promise.resolve();
   #sdk: SdkModuleLike | undefined;
   readonly #sessions = new Map<
@@ -512,6 +515,7 @@ export class OptionalCopilotSdkAdapter {
     loader: CopilotSdkLoader = defaultLoader,
     authority?: AgentRunScopeAuthority,
     options: {
+      readonly catalogTimeoutMs?: number;
       readonly cleanupTimeoutMs?: number;
       readonly onTimeout?: (details: {
         readonly runId: string;
@@ -521,6 +525,8 @@ export class OptionalCopilotSdkAdapter {
   ) {
     this.#loader = loader;
     this.#authority = authority;
+    this.#catalogTimeoutMs =
+      options.catalogTimeoutMs ?? 30_000;
     this.#cleanupTimeoutMs =
       options.cleanupTimeoutMs ?? 5_000;
     this.#onTimeout = options.onTimeout;
@@ -574,7 +580,38 @@ export class OptionalCopilotSdkAdapter {
     return this.#exclusive(async () => {
       try {
         const client = await this.#ensureClient(workingDirectory);
-        const models = await client.listModels();
+        let timer: NodeJS.Timeout | undefined;
+        const result = await Promise.race([
+          client.listModels().then(
+            (models) => ({ kind: "completed" as const, models }),
+            (error: unknown) => ({ kind: "failed" as const, error })
+          ),
+          new Promise<{ readonly kind: "timed-out" }>(
+            (resolveTimeout) => {
+              timer = setTimeout(
+                () => resolveTimeout({ kind: "timed-out" }),
+                this.#catalogTimeoutMs
+              );
+            }
+          )
+        ]).finally(() => {
+          if (timer !== undefined) clearTimeout(timer);
+        });
+        if (result.kind === "timed-out") {
+          const forced = await this.forceClose();
+          return failure(
+            "IO_ERROR",
+            "Copilot model catalog request timed out",
+            {
+              reason: "catalog-timeout",
+              cleanupConfirmed: forced.ok
+            }
+          );
+        }
+        if (result.kind === "failed") {
+          throw result.error;
+        }
+        const models = result.models;
         return success(models.map(normalizeModel));
       } catch (error) {
         return failure("IO_ERROR", "Unable to load Copilot model catalog", {
@@ -582,6 +619,50 @@ export class OptionalCopilotSdkAdapter {
         });
       }
     });
+  }
+
+  async forceClose(): Promise<Result<void>> {
+    if (this.#forceClosePromise !== undefined) {
+      return this.#forceClosePromise;
+    }
+    const client = this.#client;
+    this.#client = undefined;
+    this.#clientWorkingDirectory = undefined;
+    this.#sdk = undefined;
+    this.#sessions.clear();
+    if (client === undefined) return success(undefined);
+    const operation = (async (): Promise<Result<void>> => {
+      try {
+        const stopped = await boundedCleanup(
+          Promise.resolve().then(() => client.forceStop()),
+          this.#cleanupTimeoutMs
+        );
+        return stopped
+          ? success(undefined)
+          : failure(
+              "IO_ERROR",
+              "Copilot SDK forced cleanup timed out",
+              {
+                reason: "forced-cleanup-timeout",
+                cleanupConfirmed: false
+              }
+            );
+      } catch (error) {
+        return failure("IO_ERROR", "Copilot SDK forced cleanup failed", {
+          reason: "forced-cleanup-failed",
+          cleanupConfirmed: false,
+          cause: error instanceof Error ? error.message : String(error)
+        });
+      }
+    })();
+    this.#forceClosePromise = operation;
+    try {
+      return await operation;
+    } finally {
+      if (this.#forceClosePromise === operation) {
+        this.#forceClosePromise = undefined;
+      }
+    }
   }
 
   async send(
@@ -910,10 +991,14 @@ export class OptionalCopilotSdkAdapter {
             this.#cleanupTimeoutMs
           );
           if (!disconnected) {
+            const forced = await this.forceClose();
             return failure(
               "IO_ERROR",
               "Copilot SDK session cleanup timed out",
-              { reason: "cleanup-timeout" }
+              {
+                reason: "cleanup-timeout",
+                cleanupConfirmed: forced.ok
+              }
             );
           }
         }
@@ -935,15 +1020,24 @@ export class OptionalCopilotSdkAdapter {
             if (timer !== undefined) clearTimeout(timer);
           }
           if (errors === undefined) {
+            const forced = await this.forceClose();
             return failure(
               "IO_ERROR",
               "Copilot SDK client cleanup timed out",
-              { reason: "cleanup-timeout" }
+              {
+                reason: "cleanup-timeout",
+                cleanupConfirmed: forced.ok
+              }
             );
           }
           if (errors.length > 0) {
+            const forced = await this.forceClose();
             return failure("IO_ERROR", "Copilot SDK cleanup reported errors", {
-              errors: errors.map((error) => error.message)
+              reason: "cleanup-errors",
+              cleanupConfirmed: forced.ok,
+              errorDigests: errors.map((error) =>
+                canonicalJsonDigest(error.message)
+              )
             });
           }
         }

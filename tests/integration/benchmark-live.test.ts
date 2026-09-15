@@ -24,7 +24,9 @@ import { canonicalJsonDigest } from "../../src/core/canonical.js";
 import { sha256Base64Url } from "../../src/core/hash.js";
 import { exportBenchmarkSuite } from "../../src/benchmark/export.js";
 import {
+  benchmarkApplicationImplementationDigest,
   benchmarkApplicationSettingsDigest,
+  benchmarkCopilotPlatform,
   benchmarkDependencyClosureDigest,
   assessBenchmarkResponse,
   benchmarkSdkImplementationTreeDigest,
@@ -69,6 +71,8 @@ class FakeBenchmarkAgent implements BenchmarkAgentAdapter {
   readonly #sendPending: boolean;
   readonly #closePending: boolean;
   readonly #responseText: string | undefined;
+  readonly #omitResponse: boolean;
+  readonly #omitTurnEnd: boolean;
 
   constructor(
     authority: AgentRunScopeAuthority,
@@ -79,6 +83,8 @@ class FakeBenchmarkAgent implements BenchmarkAgentAdapter {
       readonly sendPending?: boolean;
       readonly closePending?: boolean;
       readonly responseText?: string;
+      readonly omitResponse?: boolean;
+      readonly omitTurnEnd?: boolean;
       readonly executableDigest?: string;
       readonly protocolDigest?: string;
     } = {}
@@ -90,6 +96,8 @@ class FakeBenchmarkAgent implements BenchmarkAgentAdapter {
     this.#sendPending = options.sendPending === true;
     this.#closePending = options.closePending === true;
     this.#responseText = options.responseText;
+    this.#omitResponse = options.omitResponse === true;
+    this.#omitTurnEnd = options.omitTurnEnd === true;
     this.executableDigest =
       options.executableDigest ??
       runtimeIdentity.executableDigest;
@@ -107,9 +115,10 @@ class FakeBenchmarkAgent implements BenchmarkAgentAdapter {
       return new Promise(() => undefined);
     }
     this.requests.push(request);
-    const responseText =
-      this.#responseText ??
-      request.approved.bytes.toString("utf8");
+    const responseText = this.#omitResponse
+      ? undefined
+      : this.#responseText ??
+        request.approved.bytes.toString("utf8");
     return success({
       runId: request.runId,
       sessionId:
@@ -135,6 +144,18 @@ class FakeBenchmarkAgent implements BenchmarkAgentAdapter {
         {
           type: "assistant.message",
           timestamp: "2030-01-01T00:00:00.000Z"
+        },
+        ...(this.#omitTurnEnd
+          ? []
+          : [
+              {
+                type: "assistant.turn_end",
+                timestamp: "2030-01-01T00:00:00.001Z"
+              }
+            ]),
+        {
+          type: "session.usage_checkpoint",
+          timestamp: "2030-01-01T00:00:00.002Z"
         }
       ],
       providerUsage: {
@@ -145,7 +166,7 @@ class FakeBenchmarkAgent implements BenchmarkAgentAdapter {
             (request.approved.subject.target.modelId as string)
         ]
       },
-      responseText,
+      ...(responseText === undefined ? {} : { responseText }),
       timedOut: false,
       aborted: false,
       producer
@@ -455,6 +476,21 @@ describe("benchmark live and reporting", () => {
       );
       expect(csv).toContain("terminal-status");
       expect(csv).toContain("deterministic-advice");
+      for (const line of csv.trim().split(/\r?\n/).slice(1)) {
+        expect(line).toContain(
+          report.value.report.benchmarkRunId
+        );
+        expect(line).toContain(
+          report.value.report.manifestDigest
+        );
+        expect(line).toContain(
+          report.value.report.suiteDigest
+        );
+        expect(line).toContain(report.value.report.digest);
+        expect(line).toContain(
+          report.value.report.detailedRunPath
+        );
+      }
       writeFileSync(
         join(runRoot, "reports", "shareable.json"),
         "stale preliminary report",
@@ -803,6 +839,47 @@ describe("benchmark live and reporting", () => {
       expect(first.value.executableDigest).not.toBe(
         second.value.executableDigest
       );
+      const runnerArtifact = join(runtimeRoot, "live.js");
+      const adapterArtifact = join(
+        runtimeRoot,
+        "copilot-sdk.js"
+      );
+      writeFileSync(runnerArtifact, "export const run = 1;\n");
+      writeFileSync(
+        adapterArtifact,
+        "export const adapter = 1;\n"
+      );
+      const applicationFirst = benchmarkSdkRuntimeIdentity({
+        force: true,
+        applicationArtifacts: [
+          { id: "benchmark-runner", path: runnerArtifact },
+          {
+            id: "copilot-sdk-adapter",
+            path: adapterArtifact
+          }
+        ]
+      });
+      writeFileSync(
+        adapterArtifact,
+        "export const adapter = 2;\n"
+      );
+      const applicationSecond = benchmarkSdkRuntimeIdentity({
+        force: true,
+        applicationArtifacts: [
+          { id: "benchmark-runner", path: runnerArtifact },
+          {
+            id: "copilot-sdk-adapter",
+            path: adapterArtifact
+          }
+        ]
+      });
+      expect(applicationFirst.ok).toBe(true);
+      expect(applicationSecond.ok).toBe(true);
+      if (applicationFirst.ok && applicationSecond.ok) {
+        expect(applicationFirst.value.executableDigest).not.toBe(
+          applicationSecond.value.executableDigest
+        );
+      }
       writeFileSync(
         join(secondRoot, "copilot-runtime.exe"),
         "wrapper-two",
@@ -834,6 +911,68 @@ describe("benchmark live and reporting", () => {
       rmSync(secondRoot, { recursive: true, force: true });
     }
   }, 30_000);
+
+  it("binds deployed benchmark and adapter implementation bytes", () => {
+    const root = mkdtempSync(
+      join(tmpdir(), "ctxo-benchmark-implementation-")
+    );
+    try {
+      const runner = join(root, "live.js");
+      const adapter = join(root, "copilot-sdk.js");
+      writeFileSync(runner, "export const runner = 1;\n");
+      writeFileSync(adapter, "export const adapter = 1;\n");
+      const first = benchmarkApplicationImplementationDigest([
+        { id: "benchmark-runner", path: runner },
+        { id: "copilot-sdk-adapter", path: adapter }
+      ]);
+      writeFileSync(adapter, "export const adapter = 2;\n");
+      const second = benchmarkApplicationImplementationDigest([
+        { id: "benchmark-runner", path: runner },
+        { id: "copilot-sdk-adapter", path: adapter }
+      ]);
+      expect(second).not.toBe(first);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("matches SDK glibc, musl, and explicit runtime platform selection", () => {
+    expect(
+      benchmarkCopilotPlatform({
+        platform: "linux",
+        arch: "x64",
+        glibcVersionRuntime: "2.39"
+      })
+    ).toBe("linux-x64");
+    expect(
+      benchmarkCopilotPlatform({
+        platform: "linux",
+        arch: "arm64"
+      })
+    ).toBe("linuxmusl-arm64");
+    expect(
+      benchmarkCopilotPlatform({
+        platform: "linux",
+        arch: "x64",
+        entrypoint: "C:\\runtime\\copilot-linux-x64\\bin"
+      })
+    ).toBe("linux-x64");
+    expect(
+      benchmarkCopilotPlatform({
+        platform: "linux",
+        arch: "x64",
+        entrypoint:
+          "C:\\runtime\\copilot-linuxmusl-x64\\bin",
+        glibcVersionRuntime: "2.39"
+      })
+    ).toBe("linuxmusl-x64");
+    expect(
+      benchmarkCopilotPlatform({
+        platform: "win32",
+        arch: "x64"
+      })
+    ).toBe("win32-x64");
+  });
 
   it("binds both ESM and CJS SDK implementation trees", () => {
     const root = mkdtempSync(
@@ -1001,6 +1140,189 @@ describe("benchmark live and reporting", () => {
       }
     }
   });
+
+  it("keeps response-attested trials completed when cleanup times out", async () => {
+    const externalRoot = mkdtempSync(
+      join(tmpdir(), "ctxo-benchmark-cleanup-source-")
+    );
+    const suiteRoot = resolve(
+      ".context-overflow",
+      `benchmark-cleanup-suite-${Date.now()}`
+    );
+    const runRoot = resolve(
+      ".context-overflow",
+      `benchmark-cleanup-run-${Date.now()}`
+    );
+    const requests: ApprovedAgentSendRequest[] = [];
+    let runId: string | undefined;
+    try {
+      writeManualBenchmarkFixture(externalRoot);
+      const exported = await exportBenchmarkSuite({
+        externalRoot,
+        output: suiteRoot,
+        cases: ["cq02"]
+      });
+      expect(exported.ok).toBe(true);
+      if (!exported.ok) return;
+      const planned = await runBenchmarkLive({
+        suitePath: suiteRoot,
+        output: runRoot,
+        models: ["gpt-5.4-mini"],
+        trials: 1,
+        cases: ["cq02"],
+        dryRun: true,
+        liveFlag: true,
+        environmentLiveOptIn: true,
+        cleanupTimeoutMs: 10
+      });
+      expect(planned.ok).toBe(true);
+      if (!planned.ok) return;
+      runId = planned.value.state.benchmarkRunId;
+      const executed = await runBenchmarkLive({
+        suitePath: suiteRoot,
+        output: runRoot,
+        models: ["gpt-5.4-mini"],
+        trials: 1,
+        cases: ["cq02"],
+        dryRun: false,
+        liveFlag: true,
+        environmentLiveOptIn: true,
+        approvedManifestDigest:
+          planned.value.state.manifest.digest,
+        cleanupTimeoutMs: 10,
+        agentFactory: (authority) =>
+          new FakeBenchmarkAgent(authority, requests, {
+            closePending: true
+          })
+      });
+      expect(executed.ok).toBe(true);
+      if (!executed.ok) return;
+      expect(requests).toHaveLength(2);
+      expect(
+        Object.values(executed.value.state.trials).every(
+          (record) =>
+            record.status === "completed" &&
+            record.cleanupStatus === "timed-out" &&
+            record.cleanupWarningCode === "IO_ERROR" &&
+            record.execution !== undefined &&
+            record.responsePath !== undefined
+        )
+      ).toBe(true);
+      const report = buildBenchmarkReport(runId);
+      expect(report.ok).toBe(true);
+      if (report.ok) {
+        expect(report.value.report.models[0]?.scores).toHaveLength(
+          2
+        );
+        expect(
+          report.value.report.models[0]?.cleanupStatusCounts[
+            "timed-out"
+          ]
+        ).toBe(2);
+      }
+    } finally {
+      rmSync(externalRoot, { recursive: true, force: true });
+      rmSync(suiteRoot, { recursive: true, force: true });
+      rmSync(runRoot, { recursive: true, force: true });
+      if (runId !== undefined) {
+        rmSync(
+          resolve(
+            ".context-overflow",
+            "benchmark-index",
+            `${runId}.json`
+          ),
+          { force: true }
+        );
+      }
+    }
+  }, 30_000);
+
+  it("fails a sent trial when response attestation is incomplete", async () => {
+    const externalRoot = mkdtempSync(
+      join(tmpdir(), "ctxo-benchmark-response-source-")
+    );
+    const suiteRoot = resolve(
+      ".context-overflow",
+      `benchmark-response-suite-${Date.now()}`
+    );
+    const runRoot = resolve(
+      ".context-overflow",
+      `benchmark-response-run-${Date.now()}`
+    );
+    let runId: string | undefined;
+    try {
+      writeManualBenchmarkFixture(externalRoot);
+      const exported = await exportBenchmarkSuite({
+        externalRoot,
+        output: suiteRoot,
+        cases: ["cq02"]
+      });
+      expect(exported.ok).toBe(true);
+      if (!exported.ok) return;
+      const planned = await runBenchmarkLive({
+        suitePath: suiteRoot,
+        output: runRoot,
+        models: ["gpt-5.4-mini"],
+        trials: 1,
+        cases: ["cq02"],
+        dryRun: true,
+        liveFlag: true,
+        environmentLiveOptIn: true
+      });
+      expect(planned.ok).toBe(true);
+      if (!planned.ok) return;
+      runId = planned.value.state.benchmarkRunId;
+      const executed = await runBenchmarkLive({
+        suitePath: suiteRoot,
+        output: runRoot,
+        models: ["gpt-5.4-mini"],
+        trials: 1,
+        cases: ["cq02"],
+        dryRun: false,
+        liveFlag: true,
+        environmentLiveOptIn: true,
+        approvedManifestDigest:
+          planned.value.state.manifest.digest,
+        agentFactory: (authority) =>
+          new FakeBenchmarkAgent(authority, [], {
+            omitResponse: true
+          })
+      });
+      expect(executed.ok).toBe(true);
+      if (!executed.ok) return;
+      expect(
+        Object.values(executed.value.state.trials).every(
+          (record) =>
+            record.status === "failed" &&
+            record.errorCode === "INVALID_MODEL_RESPONSE" &&
+            record.cleanupStatus === "completed" &&
+            record.execution === undefined &&
+            record.responsePath === undefined
+        )
+      ).toBe(true);
+      const report = buildBenchmarkReport(runId);
+      expect(report.ok).toBe(true);
+      if (report.ok) {
+        expect(report.value.report.models[0]?.scores).toHaveLength(
+          0
+        );
+      }
+    } finally {
+      rmSync(externalRoot, { recursive: true, force: true });
+      rmSync(suiteRoot, { recursive: true, force: true });
+      rmSync(runRoot, { recursive: true, force: true });
+      if (runId !== undefined) {
+        rmSync(
+          resolve(
+            ".context-overflow",
+            "benchmark-index",
+            `${runId}.json`
+          ),
+          { force: true }
+        );
+      }
+    }
+  }, 30_000);
 
   it("binds configured helper execution to its approved runtime", async () => {
     const externalRoot = mkdtempSync(
@@ -1224,6 +1546,21 @@ describe("benchmark live and reporting", () => {
       "actual-unsafe"
     ]);
     expect(clauseLocalNegation.contradictions).toBe(0);
+    for (const contrasted of [
+      "Expected: unsafe instead of safe. Actual: unsafe.",
+      "Expected: unsafe rather than safe. Actual: unsafe.",
+      "Expected: rejected safe; unsafe. Actual: unsafe."
+    ]) {
+      const assessed = assessBenchmarkResponse(
+        contract,
+        contrasted,
+        payload
+      );
+      expect(assessed.visibleFactIds).toEqual([
+        "actual-unsafe"
+      ]);
+      expect(assessed.contradictions).toBe(1);
+    }
     const inverted = assessBenchmarkResponse(
       contract,
       "Expected: unsafe\nReceived: safe\n",

@@ -147,6 +147,14 @@ export type BenchmarkTrialStatus =
   | "blocked"
   | "not-applicable";
 
+export type BenchmarkCleanupStatus =
+  | "not-required"
+  | "pending"
+  | "completed"
+  | "timed-out"
+  | "failed"
+  | "unknown";
+
 export interface BenchmarkExecutionReceipt {
   readonly adapterProducerId: string;
   readonly adapterProducerDigest: string;
@@ -179,6 +187,10 @@ export interface BenchmarkTrialRecord {
   readonly responseByteLength?: number;
   readonly securityAssessmentDigest?: string;
   readonly execution?: BenchmarkExecutionReceipt;
+  readonly cleanupStatus?: BenchmarkCleanupStatus;
+  readonly cleanupLatencyMs?: number;
+  readonly cleanupWarningCode?: string;
+  readonly cleanupWarningDigest?: string;
   readonly observation?: {
     readonly taskSuccess: boolean;
     readonly visibleFactIds: readonly string[];
@@ -248,6 +260,8 @@ export interface BenchmarkTrialScore {
   readonly decisions: number;
   readonly tools: number;
   readonly permissions: number;
+  readonly cleanupStatus: BenchmarkCleanupStatus;
+  readonly cleanupLatencyMs: number | null;
 }
 
 export interface BenchmarkModelReport {
@@ -255,6 +269,9 @@ export interface BenchmarkModelReport {
   readonly scores: readonly BenchmarkTrialScore[];
   readonly trialStatusCounts: Readonly<
     Record<BenchmarkTrialStatus, number>
+  >;
+  readonly cleanupStatusCounts: Readonly<
+    Record<BenchmarkCleanupStatus, number>
   >;
   readonly completePairCount: number;
   readonly completePairedCaseCount: number;

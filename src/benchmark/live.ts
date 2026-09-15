@@ -8,11 +8,13 @@ import {
 } from "node:fs";
 import {
   dirname,
+  extname,
   relative,
   resolve,
   sep
 } from "node:path";
 import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 
 import type {
   AgentRunScopeAuthority,
@@ -54,6 +56,7 @@ import { OptionalCopilotSdkAdapter } from "../adapters/copilot-sdk.js";
 import type {
   BenchmarkCaseContract,
   BenchmarkCaseId,
+  BenchmarkCleanupStatus,
   BenchmarkExportCase,
   BenchmarkModelBlock,
   BenchmarkReplayManifest,
@@ -182,6 +185,54 @@ function packageTreeDigest(root: string): string {
   });
 }
 
+export interface BenchmarkImplementationArtifact {
+  readonly id: string;
+  readonly path: string;
+}
+
+function defaultBenchmarkImplementationArtifacts(): readonly BenchmarkImplementationArtifact[] {
+  const runnerPath = fileURLToPath(import.meta.url);
+  const extension = extname(runnerPath);
+  return [
+    {
+      id: "benchmark-runner",
+      path: runnerPath
+    },
+    {
+      id: "copilot-sdk-adapter",
+      path: resolve(
+        dirname(runnerPath),
+        "..",
+        "adapters",
+        `copilot-sdk${extension}`
+      )
+    }
+  ];
+}
+
+export function benchmarkApplicationImplementationDigest(
+  artifacts: readonly BenchmarkImplementationArtifact[] =
+    defaultBenchmarkImplementationArtifacts()
+): string {
+  return canonicalJsonDigest(
+    artifacts
+      .map((artifact) => {
+        const bytes = readFileSync(artifact.path);
+        return {
+          id: artifact.id,
+          sha256: sha256Base64Url(bytes),
+          byteLength: bytes.length
+        };
+      })
+      .sort((left, right) =>
+        Buffer.compare(
+          Buffer.from(left.id, "utf8"),
+          Buffer.from(right.id, "utf8")
+        )
+      )
+  );
+}
+
 export function benchmarkDependencyClosureDigest(
   rootPackageName: string,
   rootPackagePath: string
@@ -261,14 +312,21 @@ export function benchmarkSdkImplementationTreeDigest(
 }
 
 export function benchmarkSdkRuntimeIdentity(
-  options: { readonly force?: boolean } = {}
+  options: {
+    readonly force?: boolean;
+    readonly applicationArtifacts?: readonly BenchmarkImplementationArtifact[];
+  } = {}
 ): Result<{
   readonly executableDigest: string;
   readonly protocolDigest: string;
 }> {
   try {
+    const applicationImplementationDigest =
+      benchmarkApplicationImplementationDigest(
+        options.applicationArtifacts
+      );
     const cacheKey =
-      process.env.COPILOT_CLI_PATH ?? "bundled";
+      `${process.env.COPILOT_CLI_PATH ?? "bundled"}:${applicationImplementationDigest}`;
     const cached = runtimeIdentityCache.get(cacheKey);
     if (cached !== undefined && options.force !== true) {
       return success(cached);
@@ -327,11 +385,12 @@ export function benchmarkSdkRuntimeIdentity(
       /COPILOT_CLI_USE_NPM_PACKAGE\s*=\s*true/.test(
         cliVersionBytes.toString("utf8")
       );
-    const platform =
-      process.platform === "linux"
-        ? `linux-${process.arch}`
-        : `${process.platform}-${process.arch}`;
     const explicitRuntime = process.env.COPILOT_CLI_PATH;
+    const platform = benchmarkCopilotPlatform(
+      explicitRuntime === undefined
+        ? {}
+        : { entrypoint: explicitRuntime }
+    );
     let wrapperPath: string;
     let runtimeNodePath: string;
     if (explicitRuntime !== undefined) {
@@ -397,6 +456,7 @@ export function benchmarkSdkRuntimeIdentity(
         runtimeNodeSha256: sha256Base64Url(runtimeNodeBytes),
         sdkImplementationDigest,
         runtimeImplementationDigest,
+        applicationImplementationDigest,
         overridePathDigest:
           explicitRuntime === undefined
             ? null
@@ -422,6 +482,52 @@ export function benchmarkSdkRuntimeIdentity(
       "Installed Copilot SDK runtime identity is unavailable"
     );
   }
+}
+
+export function benchmarkCopilotPlatform(
+  options: {
+    readonly platform?: NodeJS.Platform;
+    readonly arch?: string;
+    readonly entrypoint?: string;
+    readonly glibcVersionRuntime?: string;
+  } = {}
+): string {
+  const platform = options.platform ?? process.platform;
+  const arch = options.arch ?? process.arch;
+  if (platform !== "linux") return `${platform}-${arch}`;
+  const entrypoint = options.entrypoint ?? "";
+  if (entrypoint.includes(`copilot-linuxmusl-${arch}`)) {
+    return `linuxmusl-${arch}`;
+  }
+  if (entrypoint.includes(`copilot-linux-${arch}`)) {
+    return `linux-${arch}`;
+  }
+  let glibcVersionRuntime = options.glibcVersionRuntime;
+  if (
+    glibcVersionRuntime === undefined &&
+    options.platform === undefined
+  ) {
+    const report = process.report?.getReport();
+    const header =
+      report !== undefined &&
+      typeof report === "object" &&
+      report !== null &&
+      "header" in report
+        ? report.header
+        : undefined;
+    if (
+      header !== undefined &&
+      typeof header === "object" &&
+      header !== null &&
+      "glibcVersionRuntime" in header &&
+      typeof header.glibcVersionRuntime === "string"
+    ) {
+      glibcVersionRuntime = header.glibcVersionRuntime;
+    }
+  }
+  return glibcVersionRuntime === undefined
+    ? `linuxmusl-${arch}`
+    : `linux-${arch}`;
 }
 
 function terminalRecord(
@@ -827,6 +933,7 @@ export interface BenchmarkAgentAdapter {
     request: ApprovedAgentSendRequest
   ): Promise<Result<AgentSendReceipt>>;
   close(): Promise<Result<void>>;
+  forceClose?(): Promise<Result<void>>;
 }
 
 export type BenchmarkAgentFactory = (
@@ -836,6 +943,8 @@ export type BenchmarkAgentFactory = (
       readonly runId: string;
       readonly sessionId: string;
     }) => Promise<void> | void;
+    readonly catalogTimeoutMs?: number;
+    readonly cleanupTimeoutMs?: number;
   },
   runtimeIdentity?: {
     readonly executableDigest: string;
@@ -858,6 +967,12 @@ const defaultAgentFactory: BenchmarkAgentFactory = (
       undefined,
       authority,
       {
+        ...(hooks?.catalogTimeoutMs === undefined
+          ? {}
+          : { catalogTimeoutMs: hooks.catalogTimeoutMs }),
+        ...(hooks?.cleanupTimeoutMs === undefined
+          ? {}
+          : { cleanupTimeoutMs: hooks.cleanupTimeoutMs }),
         ...(hooks?.onTimeout === undefined
           ? {}
           : { onTimeout: hooks.onTimeout })
@@ -871,32 +986,98 @@ const defaultAgentFactory: BenchmarkAgentFactory = (
         adapter.listModels(workingDirectory),
       send: (request: ApprovedAgentSendRequest) =>
         adapter.send(request),
-      close: () => adapter.close()
+      close: () => adapter.close(),
+      forceClose: () => adapter.forceClose()
     };
   })();
 
-async function closeAgent(
+interface BenchmarkCleanupOutcome {
+  readonly status: "completed" | "timed-out" | "failed";
+  readonly latencyMs: number;
+  readonly warningCode?: string;
+  readonly warningDigest?: string;
+}
+
+async function boundedAgentForceClose(
   adapter: BenchmarkAgentAdapter,
-  timeoutMs = 6_000
-): Promise<Result<void>> {
+  timeoutMs: number
+): Promise<boolean> {
+  if (adapter.forceClose === undefined) return false;
   let timer: NodeJS.Timeout | undefined;
   try {
     return await Promise.race([
-      adapter.close(),
-      new Promise<Result<void>>((resolveTimeout) => {
+      adapter.forceClose().then(
+        (result) => result.ok,
+        () => false
+      ),
+      new Promise<boolean>((resolveTimeout) => {
         timer = setTimeout(
-          () =>
-            resolveTimeout(
-              failure(
-                "IO_ERROR",
-                "Benchmark agent cleanup timed out",
-                { reason: "cleanup-timeout" }
-              )
-            ),
+          () => resolveTimeout(false),
           timeoutMs
         );
       })
     ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+async function closeAgent(
+  adapter: BenchmarkAgentAdapter,
+  timeoutMs = 6_000
+): Promise<BenchmarkCleanupOutcome> {
+  const startedAt = performance.now();
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const closed = await Promise.race([
+      adapter.close().then((result) => ({
+        kind: "result" as const,
+        result
+      })),
+      new Promise<{ readonly kind: "timed-out" }>((resolveTimeout) => {
+        timer = setTimeout(
+          () => resolveTimeout({ kind: "timed-out" }),
+          timeoutMs
+        );
+      })
+    ]);
+    if (closed.kind === "result" && closed.result.ok) {
+      return {
+        status: "completed",
+        latencyMs: Math.max(0, performance.now() - startedAt)
+      };
+    }
+    let reason = "cleanup-timeout";
+    let warningCode = "IO_ERROR";
+    let cleanupConfirmed = false;
+    if (closed.kind === "result" && !closed.result.ok) {
+      const error = closed.result.error;
+      reason =
+        typeof error.details?.reason === "string"
+          ? error.details.reason
+          : "cleanup-failed";
+      warningCode = error.code;
+      cleanupConfirmed =
+        error.details?.cleanupConfirmed === true;
+    }
+    if (!cleanupConfirmed && adapter.forceClose !== undefined) {
+      cleanupConfirmed = await boundedAgentForceClose(
+        adapter,
+        timeoutMs
+      );
+    }
+    return {
+      status: reason.includes("timeout")
+        ? "timed-out"
+        : "failed",
+      latencyMs: Math.max(0, performance.now() - startedAt),
+      warningCode,
+      warningDigest: canonicalJsonDigest({
+        warningCode,
+        reason,
+        cleanupConfirmed
+      })
+    };
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }
@@ -965,8 +1146,15 @@ function escaped(value: string): string {
 }
 
 function literalPresent(text: string, value: string): boolean {
+  return literalOccurrences(text, value).length > 0;
+}
+
+function literalOccurrences(
+  text: string,
+  value: string
+): readonly { readonly start: number; readonly end: number }[] {
   const normalized = value.trim();
-  if (normalized.length === 0) return false;
+  if (normalized.length === 0) return [];
   if (/^[A-Za-z0-9_.-]+$/.test(normalized)) {
     const leftBoundary = /^[A-Za-z0-9_]/.test(normalized)
       ? "(?<![A-Za-z0-9_])"
@@ -974,14 +1162,34 @@ function literalPresent(text: string, value: string): boolean {
     const rightBoundary = /[A-Za-z0-9_]$/.test(normalized)
       ? "(?![A-Za-z0-9_])"
       : "";
-    return new RegExp(
+    return [...text.matchAll(new RegExp(
       `${leftBoundary}${escaped(
         normalized
       )}${rightBoundary}`,
-      "i"
-    ).test(text);
+      "gi"
+    ))].flatMap((match) =>
+      match.index === undefined
+        ? []
+        : [
+            {
+              start: match.index,
+              end: match.index + match[0].length
+            }
+          ]
+    );
   }
-  return text.toLowerCase().includes(normalized.toLowerCase());
+  const loweredText = text.toLowerCase();
+  const loweredValue = normalized.toLowerCase();
+  const occurrences: { start: number; end: number }[] = [];
+  let start = loweredText.indexOf(loweredValue);
+  while (start >= 0) {
+    occurrences.push({
+      start,
+      end: start + loweredValue.length
+    });
+    start = loweredText.indexOf(loweredValue, start + 1);
+  }
+  return occurrences;
 }
 
 function roleAssignments(text: string): {
@@ -1016,7 +1224,53 @@ function rolePresent(
   return roleAssignments(text).some(
     (assignment) =>
       assignment.role === role &&
-      literalPresent(assignment.clause, value)
+      literalOccurrences(assignment.clause, value).some(
+        (occurrence) =>
+          !roleOccurrenceRejected(
+            assignment.clause,
+            occurrence
+          )
+      )
+  );
+}
+
+function roleOccurrenceRejected(
+  clause: string,
+  occurrence: { readonly start: number; readonly end: number }
+): boolean {
+  const prefix = clause.slice(
+    Math.max(0, occurrence.start - 96),
+    occurrence.start
+  );
+  const suffix = clause.slice(
+    occurrence.end,
+    Math.min(clause.length, occurrence.end + 64)
+  );
+  return (
+    /(?:\bnot(?:\s+(?:equal\s+to|the\s+value))?|\bnever|\bwithout|\binstead\s+of|\brather\s+than|\bas\s+opposed\s+to|\breject(?:ed|ing)?|\bexclude(?:d|ing)?|\banything\s+but)\s*[\s"'([{,:=-]*$/i.test(
+      prefix
+    ) ||
+    /^\s*(?:[,;:=-]\s*)?(?:(?:is|was|would\s+be|should\s+be)\s+)?(?:not\s+(?:expected|correct|accepted)|incorrect|wrong|rejected|excluded)\b/i.test(
+      suffix
+    )
+  );
+}
+
+function roleRejected(
+  text: string,
+  role: "expected" | "actual",
+  value: string
+): boolean {
+  return roleAssignments(text).some(
+    (assignment) =>
+      assignment.role === role &&
+      literalOccurrences(assignment.clause, value).some(
+        (occurrence) =>
+          roleOccurrenceRejected(
+            assignment.clause,
+            occurrence
+          )
+      )
   );
 }
 
@@ -1057,7 +1311,6 @@ function contradictionCount(
   contract: BenchmarkCaseContract,
   response: string
 ): number {
-  const assignments = roleAssignments(response);
   const explicit = contract.requiredFacts.filter((fact) => {
     const factRole =
       fact.kind === "expected"
@@ -1066,14 +1319,7 @@ function contradictionCount(
           ? "actual"
           : undefined;
     if (factRole !== undefined) {
-      return assignments.some(
-        (assignment) =>
-          assignment.role === factRole &&
-          new RegExp(
-            `\\bnot\\s+${escaped(fact.value)}(?:\\b|$)`,
-            "i"
-          ).test(assignment.clause)
-      );
+      return roleRejected(response, factRole, fact.value);
     }
     return new RegExp(
       `\\bcontradicts\\s+${escaped(fact.value)}(?:\\b|$)`,
@@ -1129,6 +1375,8 @@ function deterministicAbstention(
     completedAt: now,
     sent: false,
     abstained: true,
+    cleanupStatus: "not-required",
+    cleanupLatencyMs: 0,
     observation: {
       taskSuccess: true,
       visibleFactIds: [],
@@ -1164,6 +1412,8 @@ function notApplicableHelper(
     completedAt: now,
     sent: false,
     abstained: true,
+    cleanupStatus: "not-required",
+    cleanupLatencyMs: 0,
     errorCode: "HELPER_NOT_CONFIGURED",
     errorDigest: canonicalJsonDigest("helper-not-configured")
   });
@@ -1203,6 +1453,79 @@ function stateWithoutDigest(
 ): Omit<BenchmarkRunState, "digest"> {
   const { digest: _digest, ...unsigned } = state;
   return unsigned;
+}
+
+function withCleanup(
+  plan: BenchmarkTrialPlan,
+  record: BenchmarkTrialRecord,
+  cleanup: {
+    readonly status: BenchmarkCleanupStatus;
+    readonly latencyMs: number;
+    readonly warningCode?: string;
+    readonly warningDigest?: string;
+  }
+): BenchmarkTrialRecord {
+  const {
+    trialId: _trialId,
+    digest: _digest,
+    cleanupStatus: _cleanupStatus,
+    cleanupLatencyMs: _cleanupLatencyMs,
+    cleanupWarningCode: _cleanupWarningCode,
+    cleanupWarningDigest: _cleanupWarningDigest,
+    ...unsigned
+  } = record;
+  return terminalRecord(plan, {
+    ...unsigned,
+    cleanupStatus: cleanup.status,
+    cleanupLatencyMs: cleanup.latencyMs,
+    ...(cleanup.warningCode === undefined
+      ? {}
+      : { cleanupWarningCode: cleanup.warningCode }),
+    ...(cleanup.warningDigest === undefined
+      ? {}
+      : { cleanupWarningDigest: cleanup.warningDigest })
+  });
+}
+
+async function persistTrialAndCleanup(input: {
+  readonly outputRoot: string;
+  readonly state: BenchmarkRunState;
+  readonly trials: Record<string, BenchmarkTrialRecord>;
+  readonly plan: BenchmarkTrialPlan;
+  readonly record: BenchmarkTrialRecord;
+  readonly adapter: BenchmarkAgentAdapter;
+  readonly cleanupTimeoutMs: number;
+}): Promise<Result<BenchmarkRunState>> {
+  input.trials[input.plan.trialId] = withCleanup(
+    input.plan,
+    input.record,
+    {
+      status: "pending",
+      latencyMs: 0
+    }
+  );
+  const persisted = saveRunState(input.outputRoot, {
+    ...stateWithoutDigest(input.state),
+    trials: { ...input.trials },
+    status: "running",
+    updatedAt: new Date().toISOString()
+  });
+  if (!persisted.ok) return persisted;
+  const cleanup = await closeAgent(
+    input.adapter,
+    input.cleanupTimeoutMs
+  );
+  input.trials[input.plan.trialId] = withCleanup(
+    input.plan,
+    input.trials[input.plan.trialId] as BenchmarkTrialRecord,
+    cleanup
+  );
+  return saveRunState(input.outputRoot, {
+    ...stateWithoutDigest(persisted.value),
+    trials: { ...input.trials },
+    status: "running",
+    updatedAt: new Date().toISOString()
+  });
 }
 
 export async function runBenchmarkLive(input: {
@@ -1512,6 +1835,8 @@ export async function runBenchmarkLive(input: {
         completedAt: new Date().toISOString(),
         sent: false,
         abstained: false,
+        cleanupStatus: "not-required",
+        cleanupLatencyMs: 0,
         securityAssessmentDigest: assessment.digest,
         errorCode: "SECURITY_BLOCKED",
         errorDigest: canonicalJsonDigest(
@@ -1642,6 +1967,8 @@ export async function runBenchmarkLive(input: {
     const adapter = factory(
       authority,
       {
+        catalogTimeoutMs: current.manifest.catalogTimeoutMs,
+        cleanupTimeoutMs: current.manifest.cleanupTimeoutMs,
         onTimeout: async () => {
         timeoutPersisted = true;
         mutableTrials[plan.trialId] = terminalRecord(plan, {
@@ -1715,7 +2042,7 @@ export async function runBenchmarkLive(input: {
       catalogModel === undefined ||
       catalogModel.capabilities.policyState !== "enabled"
     ) {
-      mutableTrials[plan.trialId] = terminalRecord(plan, {
+      const record = terminalRecord(plan, {
         status: "failed",
         startedAt: running.startedAt ?? new Date().toISOString(),
         completedAt: new Date().toISOString(),
@@ -1728,15 +2055,14 @@ export async function runBenchmarkLive(input: {
           catalogAvailable: catalog.ok
         })
       });
-      await closeAgent(
+      const update = await persistTrialAndCleanup({
+        outputRoot: output.value,
+        state: saved.value,
+        trials: mutableTrials,
+        plan,
+        record,
         adapter,
-        current.manifest.cleanupTimeoutMs
-      );
-      const update = saveRunState(output.value, {
-        ...stateWithoutDigest(saved.value),
-        trials: { ...mutableTrials },
-        status: "running",
-        updatedAt: new Date().toISOString()
+        cleanupTimeoutMs: current.manifest.cleanupTimeoutMs
       });
       if (!update.ok) return update;
       saved = update;
@@ -1796,7 +2122,7 @@ export async function runBenchmarkLive(input: {
       const timeout =
         timeoutPersisted ||
         sent.error.details?.reason === "timeout";
-      mutableTrials[plan.trialId] = terminalRecord(plan, {
+      const record = terminalRecord(plan, {
         status: timeout ? "timeout" : "failed",
         startedAt: running.startedAt ?? new Date().toISOString(),
         completedAt: new Date().toISOString(),
@@ -1809,52 +2135,39 @@ export async function runBenchmarkLive(input: {
           message: sent.error.message
         })
       });
-      const update = saveRunState(output.value, {
-        ...stateWithoutDigest(saved.value),
-        trials: { ...mutableTrials },
-        status: "running",
-        updatedAt: new Date().toISOString()
+      const update = await persistTrialAndCleanup({
+        outputRoot: output.value,
+        state: saved.value,
+        trials: mutableTrials,
+        plan,
+        record,
+        adapter,
+        cleanupTimeoutMs: current.manifest.cleanupTimeoutMs
       });
       if (!update.ok) return update;
       saved = update;
-      await closeAgent(
-        adapter,
-        current.manifest.cleanupTimeoutMs
-      );
       continue;
     } else {
-      const closed = await closeAgent(
-        adapter,
-        current.manifest.cleanupTimeoutMs
-      );
-      if (!closed.ok) {
-        mutableTrials[plan.trialId] = terminalRecord(plan, {
-          status: "failed",
-          startedAt:
-            running.startedAt ?? new Date().toISOString(),
-          completedAt: new Date().toISOString(),
-          sent: true,
-          abstained: false,
-          securityAssessmentDigest: assessment.digest,
-          errorCode: closed.error.code,
-          errorDigest: canonicalJsonDigest({
-            code: closed.error.code,
-            details: closed.error.details ?? null
-          })
-        });
-        const update = saveRunState(output.value, {
-          ...stateWithoutDigest(saved.value),
-          trials: { ...mutableTrials },
-          status: "running",
-          updatedAt: new Date().toISOString()
-        });
-        if (!update.ok) return update;
-        saved = update;
-        continue;
-      }
       const duplicateSession = Object.values(mutableTrials).some(
         (record) =>
           record.execution?.sessionId === sent.value.sessionId
+      );
+      const response =
+        typeof sent.value.responseText === "string"
+          ? sent.value.responseText
+          : undefined;
+      const responseBytes =
+        response === undefined
+          ? undefined
+          : Buffer.from(response, "utf8");
+      const hasAssistantMessage = sent.value.events.some(
+        (event) => event.type === "assistant.message"
+      );
+      const hasTurnEnd = sent.value.events.some(
+        (event) => event.type === "assistant.turn_end"
+      );
+      const hasUsageEvent = sent.value.events.some((event) =>
+        event.type.includes("usage")
       );
       if (
         sent.value.modelId !== plan.modelId ||
@@ -1871,9 +2184,14 @@ export async function runBenchmarkLive(input: {
           plan.permissionDigest ||
         canonicalJsonDigest(sent.value.producer) !==
           canonicalJsonDigest(benchmarkSdkMetadata) ||
-        duplicateSession
+        duplicateSession ||
+        responseBytes === undefined ||
+        responseBytes.length === 0 ||
+        !hasAssistantMessage ||
+        !hasTurnEnd ||
+        !hasUsageEvent
       ) {
-        mutableTrials[plan.trialId] = terminalRecord(plan, {
+        const record = terminalRecord(plan, {
           status: "failed",
           startedAt:
             running.startedAt ?? new Date().toISOString(),
@@ -1881,30 +2199,45 @@ export async function runBenchmarkLive(input: {
           sent: true,
           abstained: false,
           securityAssessmentDigest: assessment.digest,
-          errorCode: "EXECUTION_RECEIPT_MISMATCH",
+          errorCode:
+            responseBytes === undefined ||
+            responseBytes.length === 0 ||
+            !hasAssistantMessage ||
+            !hasTurnEnd ||
+            !hasUsageEvent
+              ? "INVALID_MODEL_RESPONSE"
+              : "EXECUTION_RECEIPT_MISMATCH",
           errorDigest: canonicalJsonDigest({
             actualModelId: sent.value.modelId ?? null,
             actualPayloadSha256:
               sent.value.applicationPayloadSha256,
             producer: sent.value.producer,
-            duplicateSession
+            duplicateSession,
+            responsePresent:
+              responseBytes !== undefined &&
+              responseBytes.length > 0,
+            hasAssistantMessage,
+            hasTurnEnd,
+            hasUsageEvent
           })
         });
-        const update = saveRunState(output.value, {
-          ...stateWithoutDigest(saved.value),
-          trials: { ...mutableTrials },
-          status: "running",
-          updatedAt: new Date().toISOString()
+        const update = await persistTrialAndCleanup({
+          outputRoot: output.value,
+          state: saved.value,
+          trials: mutableTrials,
+          plan,
+          record,
+          adapter,
+          cleanupTimeoutMs: current.manifest.cleanupTimeoutMs
         });
         if (!update.ok) return update;
         saved = update;
         continue;
       }
-      const response = sent.value.responseText ?? "";
       const responseSecurity = assessSecurity([
         {
           sourceId: `benchmark-response:${plan.trialId}`,
-          bytes: Buffer.from(response, "utf8"),
+          bytes: responseBytes,
           trustClass: "external-untrusted"
         }
       ]);
@@ -1913,7 +2246,7 @@ export async function runBenchmarkLive(input: {
           (finding) => finding.blocking
         )
       ) {
-        mutableTrials[plan.trialId] = terminalRecord(plan, {
+        const record = terminalRecord(plan, {
           status: "blocked",
           startedAt: running.startedAt ?? new Date().toISOString(),
           completedAt: new Date().toISOString(),
@@ -1929,23 +2262,40 @@ export async function runBenchmarkLive(input: {
             }))
           )
         });
+        const update = await persistTrialAndCleanup({
+          outputRoot: output.value,
+          state: saved.value,
+          trials: mutableTrials,
+          plan,
+          record,
+          adapter,
+          cleanupTimeoutMs: current.manifest.cleanupTimeoutMs
+        });
+        if (!update.ok) return update;
+        saved = update;
       } else {
-        const responseBytes = Buffer.from(response, "utf8");
+        const attestedResponse = responseBytes.toString("utf8");
         const responsePath = `responses/${plan.trialId}.txt`;
         const stored = writeNewBytes(
           output.value,
           responsePath,
           responseBytes
         );
-        if (!stored.ok) return stored;
+        if (!stored.ok) {
+          await closeAgent(
+            adapter,
+            current.manifest.cleanupTimeoutMs
+          );
+          return stored;
+        }
         const assessedResponse = assessBenchmarkResponse(
           contract.value,
-          response,
+          attestedResponse,
           payload.value
         );
         const abstained =
           /\b(?:insufficient|missing|cannot determine|can't determine|need more evidence|abstain)\b/i.test(
-            response
+            attestedResponse
           );
         const required = contract.value.requiredFacts.filter(
           (item) => item.required
@@ -1957,9 +2307,9 @@ export async function runBenchmarkLive(input: {
               required.length;
         const tokens = measureTokens(
           payload.value.toString("utf8"),
-          response
+          attestedResponse
         );
-        mutableTrials[plan.trialId] = terminalRecord(plan, {
+        const record = terminalRecord(plan, {
           status: "completed",
           startedAt: running.startedAt ?? new Date().toISOString(),
           completedAt: new Date().toISOString(),
@@ -2011,7 +2361,7 @@ export async function runBenchmarkLive(input: {
               assessedResponse.distinctFailureIds,
             citations: assessedResponse.citations,
             unsupportedClaims: unsupportedNumberClaims(
-              response,
+              attestedResponse,
               payload.value
             ),
             contradictions:
@@ -2042,16 +2392,20 @@ export async function runBenchmarkLive(input: {
             ).length
           }
         });
+        const update = await persistTrialAndCleanup({
+          outputRoot: output.value,
+          state: saved.value,
+          trials: mutableTrials,
+          plan,
+          record,
+          adapter,
+          cleanupTimeoutMs: current.manifest.cleanupTimeoutMs
+        });
+        if (!update.ok) return update;
+        saved = update;
       }
+      continue;
     }
-    const update = saveRunState(output.value, {
-      ...stateWithoutDigest(saved.value),
-      trials: { ...mutableTrials },
-      status: "running",
-      updatedAt: new Date().toISOString()
-    });
-    if (!update.ok) return update;
-    saved = update;
   }
   const hasFailures = Object.values(mutableTrials).some((record) =>
     ["failed", "timeout", "interrupted", "blocked"].includes(

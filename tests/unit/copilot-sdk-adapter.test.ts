@@ -37,9 +37,12 @@ class FakeSession implements SdkSessionLike {
   aborted = false;
   disconnected = false;
   pending = false;
+  abortPending = false;
+  disconnectPending = false;
   delayMs = 0;
   activeSends = 0;
   maxConcurrentSends = 0;
+  emitUsage = false;
 
   constructor(sessionId: string) {
     this.sessionId = sessionId;
@@ -67,6 +70,19 @@ class FakeSession implements SdkSessionLike {
         data: { content: "OK" }
       })
     );
+    if (this.emitUsage) {
+      this.handlers.forEach((handler) =>
+        handler({
+          type: "assistant.usage",
+          timestamp: "2030-01-01T00:00:00.000Z",
+          data: {
+            model: "model-1",
+            inputTokens: 123,
+            outputTokens: 45
+          }
+        })
+      );
+    }
     if (this.pending) return new Promise(() => undefined);
     if (this.delayMs > 0) {
       await new Promise((resolveDelay) =>
@@ -81,10 +97,14 @@ class FakeSession implements SdkSessionLike {
   }
 
   async abort(): Promise<void> {
+    if (this.abortPending) return new Promise(() => undefined);
     this.aborted = true;
   }
 
   async disconnect(): Promise<void> {
+    if (this.disconnectPending) {
+      return new Promise(() => undefined);
+    }
     this.disconnected = true;
   }
 }
@@ -176,14 +196,18 @@ function fakeSdk(client: FakeClient, tools: DefinedTool[]): SdkModuleLike {
 
 function createAdapter(
   client: FakeClient,
-  tools: DefinedTool[] = []
+  tools: DefinedTool[] = [],
+  cleanupTimeoutMs?: number
 ): OptionalCopilotSdkAdapter {
   return new OptionalCopilotSdkAdapter(
     async () => fakeSdk(client, tools),
     {
       issueReview: () => success("ctxo-approval:v1:test"),
       validate: () => success(undefined)
-    }
+    },
+    cleanupTimeoutMs === undefined
+      ? {}
+      : { cleanupTimeoutMs }
   );
 }
 
@@ -198,6 +222,8 @@ function request(
     modelId?: string;
     omitModel?: boolean;
     workingDirectory?: string;
+    contextTier?: "default" | "long_context";
+    reasoningEffort?: string;
   } = {}
 ): ApprovedAgentSendRequest {
   const bytes = Buffer.from("Approved payload", "utf8");
@@ -258,6 +284,12 @@ function request(
       ...(options.omitModel === true
         ? {}
         : { modelId: options.modelId ?? "model-1" }),
+      ...(options.contextTier === undefined
+        ? {}
+        : { contextTier: options.contextTier }),
+      ...(options.reasoningEffort === undefined
+        ? {}
+        : { reasoningEffort: options.reasoningEffort }),
       workingDirectory: options.workingDirectory ?? process.cwd(),
       permissions:
         options.permissions ?? {
@@ -326,6 +358,9 @@ describe("optional GitHub Copilot SDK adapter", () => {
     expect(sent.value.applicationPayloadSha256).toBe(
       sha256Base64Url(Buffer.from("Approved payload", "utf8"))
     );
+    expect(sent.value.applicationSettingsDigest).toMatch(
+      /^[A-Za-z0-9_-]{43}$/
+    );
     expect(sent.value.responseText).toBe("OK");
     expect(sent.value.events.some((event) => event.type === "session.created")).toBe(
       true
@@ -362,6 +397,7 @@ describe("optional GitHub Copilot SDK adapter", () => {
     expect(config.onPermissionRequest({ kind: "shell" })).toMatchObject({
       kind: "reject"
     });
+
     expect(config.onPermissionRequest({ kind: "write" })).toMatchObject({
       kind: "reject"
     });
@@ -378,6 +414,30 @@ describe("optional GitHub Copilot SDK adapter", () => {
       });
     }
     expect((await adapter.close()).ok).toBe(true);
+  });
+
+  it("applies and attests approved context and reasoning settings", async () => {
+    const client = new FakeClient();
+    client.session.emitUsage = true;
+    const adapter = createAdapter(client);
+    const sent = await adapter.send(
+      request(adapter, {
+        contextTier: "long_context",
+        reasoningEffort: "high"
+      })
+    );
+    expect(sent.ok).toBe(true);
+    expect(client.created[0]).toMatchObject({
+      model: "model-1",
+      contextTier: "long_context",
+      reasoningEffort: "high"
+    });
+    expect(sent.ok && sent.value.providerUsage).toEqual({
+      inputTokens: 123,
+      outputTokens: 45,
+      modelIds: ["model-1"]
+    });
+    await adapter.close();
   });
 
   it("reuses a stable cached session and rejects unverifiable resume targets", async () => {
@@ -488,6 +548,41 @@ describe("optional GitHub Copilot SDK adapter", () => {
     expect(sent.ok).toBe(false);
     expect(client.session.aborted).toBe(true);
     await adapter.close();
+  });
+
+  it("bounds abort and disconnect cleanup independently", async () => {
+    const timeoutClient = new FakeClient();
+    timeoutClient.session.pending = true;
+    timeoutClient.session.abortPending = true;
+    const timeoutAdapter = createAdapter(
+      timeoutClient,
+      [],
+      10
+    );
+    const timedOut = await timeoutAdapter.send(
+      request(timeoutAdapter, { timeoutMs: 5 })
+    );
+    expect(timedOut.ok).toBe(false);
+    if (!timedOut.ok) {
+      expect(timedOut.error.details).toMatchObject({
+        reason: "timeout",
+        abortCompleted: false
+      });
+    }
+
+    const closeClient = new FakeClient();
+    const closeAdapter = createAdapter(closeClient, [], 10);
+    expect((await closeAdapter.send(request(closeAdapter))).ok).toBe(
+      true
+    );
+    closeClient.session.disconnectPending = true;
+    const closed = await closeAdapter.close();
+    expect(closed.ok).toBe(false);
+    if (!closed.ok) {
+      expect(closed.error.details).toMatchObject({
+        reason: "cleanup-timeout"
+      });
+    }
   });
 
   it("rejects changed payloads and cross-run scopes before SDK use", async () => {

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
+import { createRequire } from "node:module";
 
 import type {
   AgentRunScopeAuthority,
@@ -82,16 +83,57 @@ function adapterMetadata(): ProducerMetadata {
 }
 
 export const benchmarkSdkMetadata = adapterMetadata();
-const sdkExecutableDigest = canonicalJsonDigest({
-  package: "@github/copilot-sdk",
-  version: "1.0.13",
-  adapterDigest: benchmarkSdkMetadata.digest
-});
-const sdkProtocolDigest = canonicalJsonDigest({
-  protocol: "ctxo-benchmark-copilot-sdk",
-  version: 1,
-  exactApplicationPayload: true
-});
+const require = createRequire(import.meta.url);
+
+export function benchmarkSdkRuntimeIdentity(): Result<{
+  readonly executableDigest: string;
+  readonly protocolDigest: string;
+}> {
+  try {
+    const entry = require.resolve("@github/copilot-sdk");
+    let packageRoot = dirname(entry);
+    while (
+      !existsSync(resolve(packageRoot, "package.json"))
+    ) {
+      const parent = dirname(packageRoot);
+      if (parent === packageRoot) {
+        throw new Error("SDK package root not found");
+      }
+      packageRoot = parent;
+    }
+    const packagePath = resolve(
+      packageRoot,
+      "package.json"
+    );
+    const protocolPath = resolve(
+      dirname(entry),
+      "sdkProtocolVersion.js"
+    );
+    const packageBytes = readFileSync(packagePath);
+    const entryBytes = readFileSync(entry);
+    const protocolBytes = readFileSync(protocolPath);
+    return success({
+      executableDigest: canonicalJsonDigest({
+        packageSha256: sha256Base64Url(packageBytes),
+        entrySha256: sha256Base64Url(entryBytes),
+        adapterDigest: benchmarkSdkMetadata.digest
+      }),
+      protocolDigest: canonicalJsonDigest({
+        sdkProtocolSha256:
+          sha256Base64Url(protocolBytes),
+        benchmarkProtocol: {
+          version: 1,
+          exactApplicationPayload: true
+        }
+      })
+    });
+  } catch {
+    return failure(
+      "IO_ERROR",
+      "Installed Copilot SDK runtime identity is unavailable"
+    );
+  }
+}
 
 function terminalRecord(
   plan: BenchmarkTrialPlan,
@@ -140,6 +182,8 @@ function parseCaseSelection(
 }
 
 function modelBlocks(models: readonly string[]): Result<readonly BenchmarkModelBlock[]> {
+  const runtime = benchmarkSdkRuntimeIdentity();
+  if (!runtime.ok) return runtime;
   const unique = [...new Set(models.map((model) => model.trim()))].filter(
     Boolean
   );
@@ -154,22 +198,41 @@ function modelBlocks(models: readonly string[]): Result<readonly BenchmarkModelB
   }
   return success(
     unique.map((modelId) => {
-      const settings = {
-        modelId,
-        contextTier: "default",
-        reasoningEffort: "default",
-        permissions
-      };
       return {
         modelId,
-        settingsDigest: canonicalJsonDigest(settings),
+        contextTier: "default" as const,
+        reasoningEffort: null,
+        settingsDigest: benchmarkApplicationSettingsDigest(
+          modelId,
+          permissions
+        ),
         permissionDigest: canonicalJsonDigest(permissions),
         adapterId: benchmarkSdkMetadata.producerId,
-        executableDigest: sdkExecutableDigest,
-        protocolDigest: sdkProtocolDigest
+        executableDigest: runtime.value.executableDigest,
+        protocolDigest: runtime.value.protocolDigest
       };
     })
   );
+}
+
+export function benchmarkApplicationSettingsDigest(
+  modelId: string,
+  approvedPermissions: PermissionEnvelope
+): string {
+  return canonicalJsonDigest({
+    modelId,
+    contextTier: "default",
+    reasoningEffort: null,
+    permissions: approvedPermissions,
+    availableTools: [
+      ...(approvedPermissions.evidenceRead
+        ? ["evidence_read"]
+        : []),
+      ...(approvedPermissions.sourceRead
+        ? ["source_read"]
+        : [])
+    ]
+  });
 }
 
 function createPlans(input: {
@@ -188,15 +251,16 @@ function createPlans(input: {
     if (item.kind === "helper") {
       for (let trial = 1; trial <= input.trials; trial += 1) {
         const modelId = input.helperModelId ?? "not-configured";
-        const settingsDigest = canonicalJsonDigest({
-          modelId,
-          helper: true,
-          permissions: {
-            ...permissions,
-            sourceRead: false,
-            evidenceRead: false
-          }
-        });
+        const helperPermissions = {
+          ...permissions,
+          sourceRead: false,
+          evidenceRead: false
+        };
+        const settingsDigest =
+          benchmarkApplicationSettingsDigest(
+            modelId,
+            helperPermissions
+          );
         blocks.push([
           {
             trialId: randomUUID(),
@@ -213,11 +277,8 @@ function createPlans(input: {
             deterministicAbstention: false,
             helper: true,
             settingsDigest,
-            permissionDigest: canonicalJsonDigest({
-              ...permissions,
-              sourceRead: false,
-              evidenceRead: false
-            }),
+            permissionDigest:
+              canonicalJsonDigest(helperPermissions),
             pairDigest: canonicalJsonDigest({
               caseId: item.caseId,
               trial,
@@ -246,7 +307,9 @@ function createPlans(input: {
         blocks.push(
           arms.map((arm) => {
             const identity =
-              arm === "original" ? item.original : item.prepared;
+              arm === "original" || arm === "task"
+                ? item.original
+                : item.prepared;
             return {
               trialId: randomUUID(),
               caseId: item.caseId,
@@ -293,6 +356,9 @@ function createManifest(input: {
   readonly models: readonly BenchmarkModelBlock[];
   readonly helperModelId?: string;
   readonly trials: number;
+  readonly modelTimeoutMs: number;
+  readonly catalogTimeoutMs: number;
+  readonly cleanupTimeoutMs: number;
   readonly now?: string;
 }): BenchmarkReplayManifest {
   const seed = planSeed(input.suiteDigest);
@@ -314,6 +380,9 @@ function createManifest(input: {
     sourceRootDigest: input.sourceRootDigest,
     seed,
     trials: input.trials,
+    modelTimeoutMs: input.modelTimeoutMs,
+    catalogTimeoutMs: input.catalogTimeoutMs,
+    cleanupTimeoutMs: input.cleanupTimeoutMs,
     liveOptIn: true,
     selectedCases: input.selectedCases,
     modelBlocks: input.models,
@@ -375,6 +444,8 @@ class BenchmarkSuiteAuthority implements AgentRunScopeAuthority {
         this.#manifestDigest ||
       input.approved.subject.target.modelId !== this.#modelId ||
       input.approved.subject.target.sessionId !== undefined ||
+      input.approved.subject.target.contextTier !== "default" ||
+      input.approved.subject.target.reasoningEffort !== undefined ||
       canonicalJsonDigest(
         input.approved.subject.target.permissions
       ) !== canonicalJsonDigest(this.#permissions) ||
@@ -420,6 +491,11 @@ class BenchmarkSuiteAuthority implements AgentRunScopeAuthority {
 
 export interface BenchmarkAgentAdapter {
   readonly metadata: ProducerMetadata;
+  readonly executableDigest: string;
+  readonly protocolDigest: string;
+  listModels(
+    workingDirectory?: string
+  ): Promise<Result<readonly import("../contracts/agent.js").ModelCatalogEntry[]>>;
   send(
     request: ApprovedAgentSendRequest
   ): Promise<Result<AgentSendReceipt>>;
@@ -431,7 +507,85 @@ export type BenchmarkAgentFactory = (
 ) => BenchmarkAgentAdapter;
 
 const defaultAgentFactory: BenchmarkAgentFactory = (authority) =>
-  new OptionalCopilotSdkAdapter(undefined, authority);
+  (() => {
+    const identity = benchmarkSdkRuntimeIdentity();
+    if (!identity.ok) {
+      throw new Error(identity.error.message);
+    }
+    const adapter = new OptionalCopilotSdkAdapter(
+      undefined,
+      authority
+    );
+    return {
+      metadata: adapter.metadata,
+      executableDigest: identity.value.executableDigest,
+      protocolDigest: identity.value.protocolDigest,
+      listModels: (workingDirectory?: string) =>
+        adapter.listModels(workingDirectory),
+      send: (request: ApprovedAgentSendRequest) =>
+        adapter.send(request),
+      close: () => adapter.close()
+    };
+  })();
+
+async function closeAgent(
+  adapter: BenchmarkAgentAdapter,
+  timeoutMs = 6_000
+): Promise<Result<void>> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      adapter.close(),
+      new Promise<Result<void>>((resolveTimeout) => {
+        timer = setTimeout(
+          () =>
+            resolveTimeout(
+              failure(
+                "IO_ERROR",
+                "Benchmark agent cleanup timed out",
+                { reason: "cleanup-timeout" }
+              )
+            ),
+          timeoutMs
+        );
+      })
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+async function boundedResult<T>(
+  operation: Promise<Result<T>>,
+  timeoutMs: number,
+  message: string
+): Promise<Result<T>> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      operation.catch((error) =>
+        failure("IO_ERROR", message, {
+          errorDigest: canonicalJsonDigest(
+            error instanceof Error ? error.message : String(error)
+          )
+        })
+      ),
+      new Promise<Result<T>>((resolveTimeout) => {
+        timer = setTimeout(
+          () =>
+            resolveTimeout(
+              failure("IO_ERROR", message, {
+                reason: "timeout"
+              })
+            ),
+          timeoutMs
+        );
+      })
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
 
 function responseFacts(
   contract: BenchmarkCaseContract,
@@ -472,10 +626,38 @@ function unsupportedNumberClaims(
   ].filter((value) => !source.includes(value)).length;
 }
 
+function recoverableFacts(
+  contract: BenchmarkCaseContract,
+  payload: Buffer
+): string[] {
+  const text = payload.toString("utf8").toLowerCase();
+  return contract.requiredFacts
+    .filter((fact) =>
+      text.includes(fact.value.toLowerCase())
+    )
+    .map((fact) => fact.factId);
+}
+
+function contradictionCount(
+  contract: BenchmarkCaseContract,
+  response: string
+): number {
+  const text = response.toLowerCase();
+  return contract.requiredFacts.filter((fact) => {
+    const value = fact.value.toLowerCase();
+    return (
+      text.includes(`not ${value}`) ||
+      text.includes(`instead of ${value}`) ||
+      text.includes(`contradicts ${value}`)
+    );
+  }).length;
+}
+
 function deterministicAbstention(
   plan: BenchmarkTrialPlan,
   item: BenchmarkExportCase,
-  contract: BenchmarkCaseContract
+  contract: BenchmarkCaseContract,
+  payload: Buffer
 ): BenchmarkTrialRecord {
   const now = new Date().toISOString();
   return terminalRecord(plan, {
@@ -487,23 +669,21 @@ function deterministicAbstention(
     observation: {
       taskSuccess: true,
       visibleFactIds: [],
-      recoverableFactIds: contract.requiredFacts.map(
-        (fact) => fact.factId
-      ),
+      recoverableFactIds: recoverableFacts(contract, payload),
       distinctFailureIds: [],
       citations: [],
       unsupportedClaims: 0,
       contradictions: 0,
       abstained: true,
-      retrievalTokens: 0,
+      retrievalTokens: null,
       retrievalCalls: 0,
-      retrievalLatencyMs: 0,
+      retrievalLatencyMs: null,
       preparationLatencyMs: item.preparationLatencyMs,
       reviewLatencyMs: 0,
-      handoffLatencyMs: 0,
+      handoffLatencyMs: null,
       modelLatencyMs: 0,
-      inputTokens: 0,
-      outputTokens: 0,
+      inputTokens: null,
+      outputTokens: null,
       decisions: 1,
       tools: 0,
       permissions: 0
@@ -575,6 +755,9 @@ export async function runBenchmarkLive(input: {
   readonly approvedManifestDigest?: string;
   readonly now?: string;
   readonly agentFactory?: BenchmarkAgentFactory;
+  readonly modelTimeoutMs?: number;
+  readonly catalogTimeoutMs?: number;
+  readonly cleanupTimeoutMs?: number;
 }): Promise<
   Result<{
     readonly state: BenchmarkRunState;
@@ -589,6 +772,22 @@ export async function runBenchmarkLive(input: {
     return failure(
       "INVALID_ARGUMENT",
       "Benchmark trials must be an integer from 1 through 20"
+    );
+  }
+  const modelTimeoutMs = input.modelTimeoutMs ?? 120_000;
+  const catalogTimeoutMs = input.catalogTimeoutMs ?? 30_000;
+  const cleanupTimeoutMs = input.cleanupTimeoutMs ?? 6_000;
+  if (
+    ![modelTimeoutMs, catalogTimeoutMs, cleanupTimeoutMs].every(
+      (value) =>
+        Number.isSafeInteger(value) &&
+        value > 0 &&
+        value <= 10 * 60_000
+    )
+  ) {
+    return failure(
+      "INVALID_ARGUMENT",
+      "Benchmark timeouts must be positive bounded integers"
     );
   }
   const suite = loadBenchmarkSuite(input.suitePath);
@@ -623,6 +822,9 @@ export async function runBenchmarkLive(input: {
         ? {}
         : { helperModelId: input.helperModelId }),
       trials: input.trials,
+      modelTimeoutMs,
+      catalogTimeoutMs,
+      cleanupTimeoutMs,
       ...(input.now === undefined ? {} : { now: input.now })
     });
     const created = saveRunState(output.value, {
@@ -649,9 +851,11 @@ export async function runBenchmarkLive(input: {
     canonicalJson(current.manifest.selectedCases) !==
       canonicalJson(selected.value) ||
     current.manifest.trials !== input.trials ||
-    canonicalJson(
-      current.manifest.modelBlocks.map((item) => item.modelId)
-    ) !== canonicalJson(blocks.value.map((item) => item.modelId)) ||
+    current.manifest.modelTimeoutMs !== modelTimeoutMs ||
+    current.manifest.catalogTimeoutMs !== catalogTimeoutMs ||
+    current.manifest.cleanupTimeoutMs !== cleanupTimeoutMs ||
+    canonicalJson(current.manifest.modelBlocks) !==
+      canonicalJson(blocks.value) ||
     current.manifest.helperModelId !== input.helperModelId
   ) {
     return failure(
@@ -739,10 +943,18 @@ export async function runBenchmarkLive(input: {
     const contract = loadCaseContract(suite.value.root, item);
     if (!contract.ok) return contract;
     if (plan.deterministicAbstention) {
+      const identity =
+        plan.arm === "original" ? item.original : item.prepared;
+      const abstentionPayload = readBoundBytes(
+        suite.value.root,
+        identity
+      );
+      if (!abstentionPayload.ok) return abstentionPayload;
       mutableTrials[plan.trialId] = deterministicAbstention(
         plan,
         item,
-        contract.value
+        contract.value,
+        abstentionPayload.value
       );
       const update = saveRunState(output.value, {
         ...stateWithoutDigest(saved.value),
@@ -768,9 +980,20 @@ export async function runBenchmarkLive(input: {
       continue;
     }
     const identity =
-      plan.arm === "original" || plan.arm === "task"
+      plan.payloadPath === item.original.path
         ? item.original
-        : item.prepared;
+        : plan.payloadPath === item.prepared.path
+          ? item.prepared
+          : undefined;
+    if (
+      identity === undefined ||
+      identity.sha256 !== plan.payloadSha256
+    ) {
+      return failure(
+        "INTEGRITY_ERROR",
+        "Benchmark plan payload binding is invalid"
+      );
+    }
     const payload = readBoundBytes(suite.value.root, identity);
     if (!payload.ok) return payload;
     const assessment = assessSecurity([
@@ -852,6 +1075,7 @@ export async function runBenchmarkLive(input: {
       target: {
         adapterId: benchmarkSdkMetadata.producerId,
         modelId: plan.modelId,
+        contextTier: "default",
         workingDirectory: output.value,
         permissions: trialPermissions
       },
@@ -910,30 +1134,109 @@ export async function runBenchmarkLive(input: {
     if (!runningState.ok) return runningState;
     saved = runningState;
     const adapter = factory(authority);
+    const runtimeIdentity = benchmarkSdkRuntimeIdentity();
+    if (!runtimeIdentity.ok) {
+      await closeAgent(
+        adapter,
+        current.manifest.cleanupTimeoutMs
+      );
+      return runtimeIdentity;
+    }
+    const modelBlock = current.manifest.modelBlocks.find(
+      (block) => block.modelId === plan.modelId
+    );
+    const expectedExecutableDigest =
+      plan.helper
+        ? runtimeIdentity.value.executableDigest
+        : modelBlock?.executableDigest;
+    const expectedProtocolDigest =
+      plan.helper
+        ? runtimeIdentity.value.protocolDigest
+        : modelBlock?.protocolDigest;
+    if (
+      adapter.executableDigest !==
+        expectedExecutableDigest ||
+      adapter.protocolDigest !==
+        expectedProtocolDigest
+    ) {
+      await closeAgent(
+        adapter,
+        current.manifest.cleanupTimeoutMs
+      );
+      return failure(
+        "INTEGRITY_ERROR",
+        "Benchmark adapter identity does not match the replay manifest"
+      );
+    }
+    const catalog = await boundedResult(
+      adapter.listModels(output.value),
+      current.manifest.catalogTimeoutMs,
+      "Benchmark model catalog request failed"
+    );
+    const catalogModel = catalog.ok
+      ? catalog.value.find((model) => model.id === plan.modelId)
+      : undefined;
+    if (
+      !catalog.ok ||
+      catalogModel === undefined ||
+      catalogModel.capabilities.policyState !== "enabled"
+    ) {
+      mutableTrials[plan.trialId] = terminalRecord(plan, {
+        status: "failed",
+        startedAt: running.startedAt ?? new Date().toISOString(),
+        completedAt: new Date().toISOString(),
+        sent: false,
+        abstained: false,
+        securityAssessmentDigest: assessment.digest,
+        errorCode: "MODEL_UNAVAILABLE",
+        errorDigest: canonicalJsonDigest({
+          modelId: plan.modelId,
+          catalogAvailable: catalog.ok
+        })
+      });
+      await closeAgent(
+        adapter,
+        current.manifest.cleanupTimeoutMs
+      );
+      const update = saveRunState(output.value, {
+        ...stateWithoutDigest(saved.value),
+        trials: { ...mutableTrials },
+        status: "running",
+        updatedAt: new Date().toISOString()
+      });
+      if (!update.ok) return update;
+      saved = update;
+      continue;
+    }
     const modelStartedAt = performance.now();
     let sent: Result<AgentSendReceipt>;
     try {
-      sent = await adapter.send({
-        runId: plan.trialId,
-        approved: {
-          bytes: payload.value,
-          subject: subject.value,
-          approval: approval.value,
-          evidenceFacts: [],
-          authorityToken: authorityToken.value
-        },
-        readScope,
-        security: {
-          assessment,
-          authorization: authorization.value,
-          assessedSource: {
-            sourceId: `benchmark:${plan.trialId}`,
+      sent = await boundedResult(
+        adapter.send({
+          runId: plan.trialId,
+          approved: {
             bytes: payload.value,
-            trustClass: "external-untrusted"
-          }
-        },
-        timeoutMs: 120_000
-      });
+            subject: subject.value,
+            approval: approval.value,
+            evidenceFacts: [],
+            authorityToken: authorityToken.value
+          },
+          readScope,
+          security: {
+            assessment,
+            authorization: authorization.value,
+            assessedSource: {
+              sourceId: `benchmark:${plan.trialId}`,
+              bytes: payload.value,
+              trustClass: "external-untrusted"
+            }
+          },
+          timeoutMs: current.manifest.modelTimeoutMs
+        }),
+        current.manifest.modelTimeoutMs +
+          current.manifest.cleanupTimeoutMs,
+        "Benchmark model request timed out"
+      );
     } catch (error) {
       sent = failure("IO_ERROR", "Benchmark agent threw", {
         errorDigest: canonicalJsonDigest(
@@ -945,19 +1248,9 @@ export async function runBenchmarkLive(input: {
       0,
       performance.now() - modelStartedAt
     );
-    let closed: Result<void>;
-    try {
-      closed = await adapter.close();
-    } catch (error) {
-      closed = failure("IO_ERROR", "Benchmark agent close threw", {
-        errorDigest: canonicalJsonDigest(
-          error instanceof Error ? error.message : String(error)
-        )
-      });
-    }
-    if (!closed.ok && sent.ok) sent = closed;
     if (!sent.ok) {
-      const timeout = /timeout/i.test(sent.error.message);
+      const timeout =
+        sent.error.details?.reason === "timeout";
       mutableTrials[plan.trialId] = terminalRecord(plan, {
         status: timeout ? "timeout" : "failed",
         startedAt: running.startedAt ?? new Date().toISOString(),
@@ -971,7 +1264,49 @@ export async function runBenchmarkLive(input: {
           message: sent.error.message
         })
       });
+      const update = saveRunState(output.value, {
+        ...stateWithoutDigest(saved.value),
+        trials: { ...mutableTrials },
+        status: "running",
+        updatedAt: new Date().toISOString()
+      });
+      if (!update.ok) return update;
+      saved = update;
+      await closeAgent(
+        adapter,
+        current.manifest.cleanupTimeoutMs
+      );
+      continue;
     } else {
+      const closed = await closeAgent(
+        adapter,
+        current.manifest.cleanupTimeoutMs
+      );
+      if (!closed.ok) {
+        mutableTrials[plan.trialId] = terminalRecord(plan, {
+          status: "failed",
+          startedAt:
+            running.startedAt ?? new Date().toISOString(),
+          completedAt: new Date().toISOString(),
+          sent: true,
+          abstained: false,
+          securityAssessmentDigest: assessment.digest,
+          errorCode: closed.error.code,
+          errorDigest: canonicalJsonDigest({
+            code: closed.error.code,
+            details: closed.error.details ?? null
+          })
+        });
+        const update = saveRunState(output.value, {
+          ...stateWithoutDigest(saved.value),
+          trials: { ...mutableTrials },
+          status: "running",
+          updatedAt: new Date().toISOString()
+        });
+        if (!update.ok) return update;
+        saved = update;
+        continue;
+      }
       const duplicateSession = Object.values(mutableTrials).some(
         (record) =>
           record.execution?.sessionId === sent.value.sessionId
@@ -980,6 +1315,10 @@ export async function runBenchmarkLive(input: {
         sent.value.modelId !== plan.modelId ||
         sent.value.applicationPayloadSha256 !==
           identity.sha256 ||
+        sent.value.applicationSettingsDigest !==
+          plan.settingsDigest ||
+        canonicalJsonDigest(sent.value.permissions) !==
+          plan.permissionDigest ||
         canonicalJsonDigest(sent.value.producer) !==
           canonicalJsonDigest(benchmarkSdkMetadata) ||
         duplicateSession
@@ -1078,8 +1417,8 @@ export async function runBenchmarkLive(input: {
           execution: {
             adapterProducerId: sent.value.producer.producerId,
             adapterProducerDigest: sent.value.producer.digest,
-            executableDigest: sdkExecutableDigest,
-            protocolDigest: sdkProtocolDigest,
+            executableDigest: adapter.executableDigest,
+            protocolDigest: adapter.protocolDigest,
             actualModelId: sent.value.modelId ?? plan.modelId,
             actualSettingsDigest: plan.settingsDigest,
             sessionId: sent.value.sessionId,
@@ -1088,10 +1427,14 @@ export async function runBenchmarkLive(input: {
               sent.value.applicationPayloadSha256,
             eventCount: sent.value.events.length,
             modelLatencyMs,
-            inputTokens: tokens.ok
+            inputTokens:
+              sent.value.providerUsage?.inputTokens ?? null,
+            outputTokens:
+              sent.value.providerUsage?.outputTokens ?? null,
+            localInputTokens: tokens.ok
               ? tokens.value.originalTokens
               : 0,
-            outputTokens: tokens.ok
+            localOutputTokens: tokens.ok
               ? tokens.value.preparedTokens
               : 0,
             toolOutcomes: sent.value.events.filter((event) =>
@@ -1106,8 +1449,9 @@ export async function runBenchmarkLive(input: {
               !abstained &&
               (required.length === 0 || visibleRecall >= 0.5),
             visibleFactIds: found.visible,
-            recoverableFactIds: contract.value.requiredFacts.map(
-              (fact) => fact.factId
+            recoverableFactIds: recoverableFacts(
+              contract.value,
+              payload.value
             ),
             distinctFailureIds: found.failures,
             citations: found.citations,
@@ -1115,26 +1459,27 @@ export async function runBenchmarkLive(input: {
               response,
               payload.value
             ),
-            contradictions: 0,
+            contradictions: contradictionCount(
+              contract.value,
+              response
+            ),
             abstained,
-            retrievalTokens: 0,
+            retrievalTokens: null,
             retrievalCalls: sent.value.events.filter((event) =>
               event.type.includes("tool")
             ).length,
-            retrievalLatencyMs: 0,
+            retrievalLatencyMs: null,
             preparationLatencyMs: item.preparationLatencyMs,
             reviewLatencyMs: Math.max(
               0,
               modelStartedAt - reviewStartedAt
             ),
-            handoffLatencyMs: 0,
+            handoffLatencyMs: null,
             modelLatencyMs,
-            inputTokens: tokens.ok
-              ? tokens.value.originalTokens
-              : 0,
-            outputTokens: tokens.ok
-              ? tokens.value.preparedTokens
-              : 0,
+            inputTokens:
+              sent.value.providerUsage?.inputTokens ?? null,
+            outputTokens:
+              sent.value.providerUsage?.outputTokens ?? null,
             decisions: 1,
             tools: sent.value.events.filter((event) =>
               event.type.includes("tool")

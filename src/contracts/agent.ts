@@ -60,8 +60,14 @@ export interface AgentSendReceipt {
   readonly messageId?: string;
   readonly modelId?: string;
   readonly applicationPayloadSha256: string;
+  readonly applicationSettingsDigest: string;
   readonly permissions: PermissionEnvelope;
   readonly events: readonly AgentEventRecord[];
+  readonly providerUsage?: {
+    readonly inputTokens: number;
+    readonly outputTokens: number;
+    readonly modelIds: readonly string[];
+  };
   readonly responseText?: string;
   readonly timedOut: boolean;
   readonly aborted: boolean;

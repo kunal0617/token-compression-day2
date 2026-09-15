@@ -2,6 +2,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -21,10 +22,16 @@ import { canonicalJsonDigest } from "../../src/core/canonical.js";
 import { sha256Base64Url } from "../../src/core/hash.js";
 import { exportBenchmarkSuite } from "../../src/benchmark/export.js";
 import {
+  benchmarkApplicationSettingsDigest,
   benchmarkSdkMetadata,
+  benchmarkSdkRuntimeIdentity,
   type BenchmarkAgentAdapter,
   runBenchmarkLive
 } from "../../src/benchmark/live.js";
+import {
+  benchmarkPathFromRelative,
+  relativeToBenchmarkRoot
+} from "../../src/benchmark/io.js";
 import {
   buildBenchmarkReport,
   writeBenchmarkReport
@@ -33,13 +40,27 @@ import { runCli } from "../../src/main.js";
 import { writeManualBenchmarkFixture } from "../helpers/manual-benchmark-fixture.js";
 
 const producer: ProducerMetadata = benchmarkSdkMetadata;
+function requiredRuntimeIdentity() {
+  const identity = benchmarkSdkRuntimeIdentity();
+  if (!identity.ok) {
+    throw new Error(identity.error.message);
+  }
+  return identity.value;
+}
+const runtimeIdentity = requiredRuntimeIdentity();
 
 class FakeBenchmarkAgent implements BenchmarkAgentAdapter {
   readonly metadata = producer;
+  readonly executableDigest =
+    runtimeIdentity.executableDigest;
+  readonly protocolDigest =
+    runtimeIdentity.protocolDigest;
   readonly #authority: AgentRunScopeAuthority;
   readonly requests: ApprovedAgentSendRequest[];
   readonly #overrideModelId: string | undefined;
   readonly #fixedSessionId: string | undefined;
+  readonly #sendPending: boolean;
+  readonly #closePending: boolean;
 
   constructor(
     authority: AgentRunScopeAuthority,
@@ -47,12 +68,16 @@ class FakeBenchmarkAgent implements BenchmarkAgentAdapter {
     options: {
       readonly overrideModelId?: string;
       readonly fixedSessionId?: string;
+      readonly sendPending?: boolean;
+      readonly closePending?: boolean;
     } = {}
   ) {
     this.#authority = authority;
     this.requests = requests;
     this.#overrideModelId = options.overrideModelId;
     this.#fixedSessionId = options.fixedSessionId;
+    this.#sendPending = options.sendPending === true;
+    this.#closePending = options.closePending === true;
   }
 
   async send(
@@ -60,6 +85,9 @@ class FakeBenchmarkAgent implements BenchmarkAgentAdapter {
   ): Promise<Result<AgentSendReceipt>> {
     const valid = this.#authority.validate(request);
     if (!valid.ok) return valid;
+    if (this.#sendPending) {
+      return new Promise(() => undefined);
+    }
     this.requests.push(request);
     const responseText = request.approved.bytes.toString("utf8");
     return success({
@@ -76,6 +104,11 @@ class FakeBenchmarkAgent implements BenchmarkAgentAdapter {
       applicationPayloadSha256: sha256Base64Url(
         request.approved.bytes
       ),
+      applicationSettingsDigest:
+        benchmarkApplicationSettingsDigest(
+          request.approved.subject.target.modelId as string,
+          request.approved.subject.target.permissions
+        ),
       permissions:
         request.approved.subject.target.permissions,
       events: [
@@ -91,7 +124,32 @@ class FakeBenchmarkAgent implements BenchmarkAgentAdapter {
     });
   }
 
+  async listModels() {
+    const requested =
+      this.#overrideModelId ?? "gpt-5.4-mini";
+    return success([
+      {
+        id: "claude-opus-5",
+        name: "Claude Opus 5",
+        capabilities: { policyState: "enabled" }
+      },
+      {
+        id: "gpt-5.4-mini",
+        name: "GPT-5.4 mini",
+        capabilities: { policyState: "enabled" }
+      },
+      {
+        id: requested,
+        name: requested,
+        capabilities: { policyState: "enabled" }
+      }
+    ]);
+  }
+
   async close(): Promise<Result<void>> {
+    if (this.#closePending) {
+      return new Promise(() => undefined);
+    }
     return success(undefined);
   }
 }
@@ -133,6 +191,15 @@ describe("benchmark live and reporting", () => {
       expect(
         planned.value.state.manifest.estimatedCallCount
       ).toBe(102);
+      expect(
+        planned.value.state.manifest.plans
+          .filter((plan) => plan.caseId === "mf01")
+          .every(
+            (plan) =>
+              plan.arm === "task" &&
+              plan.payloadPath?.endsWith("/original.bin")
+          )
+      ).toBe(true);
       const pairs = planned.value.state.manifest.plans.filter(
         (plan) =>
           plan.caseId === "cq02" &&
@@ -309,6 +376,11 @@ describe("benchmark live and reporting", () => {
       const report = buildBenchmarkReport(runId);
       expect(report.ok).toBe(true);
       if (!report.ok) return;
+      expect(
+        report.value.report.deterministicAdvice.some(
+          (item) => item.caseId === "mf01"
+        )
+      ).toBe(true);
       expect(report.value.report.models.map((model) => model.modelId)).toEqual(
         expect.arrayContaining([
           "claude-opus-5",
@@ -324,6 +396,20 @@ describe("benchmark live and reporting", () => {
       expect(
         writeBenchmarkReport(runId, "csv").ok
       ).toBe(true);
+      writeFileSync(
+        join(runRoot, "reports", "shareable.json"),
+        "stale preliminary report",
+        "utf8"
+      );
+      expect(
+        writeBenchmarkReport(runId, "json").ok
+      ).toBe(true);
+      expect(
+        readFileSync(
+          join(runRoot, "reports", "shareable.json"),
+          "utf8"
+        )
+      ).toContain(runId);
 
       const response = Object.values(
         executed.value.state.trials
@@ -456,6 +542,7 @@ describe("benchmark live and reporting", () => {
         output: suiteRoot,
         cases: ["cq02"]
       });
+
       expect(exported.ok).toBe(true);
       if (!exported.ok) return;
       const planned = await runBenchmarkLive({
@@ -498,6 +585,126 @@ describe("benchmark live and reporting", () => {
                 "EXECUTION_RECEIPT_MISMATCH"
           )
       ).toBe(true);
+      const report = buildBenchmarkReport(runId);
+      expect(report.ok).toBe(true);
+      if (report.ok) {
+        expect(
+          report.value.report.models[0]?.trialStatusCounts.failed
+        ).toBe(2);
+        expect(
+          report.value.report.models[0]?.completePairCount
+        ).toBe(0);
+        expect(
+          report.value.report.models[0]?.warnings.some(
+            (warning) => warning.includes("failure")
+          )
+        ).toBe(true);
+      }
+    } finally {
+      rmSync(externalRoot, { recursive: true, force: true });
+      rmSync(suiteRoot, { recursive: true, force: true });
+      rmSync(runRoot, { recursive: true, force: true });
+      if (runId !== undefined) {
+        rmSync(
+          resolve(
+            ".context-overflow",
+            "benchmark-index",
+            `${runId}.json`
+          ),
+          { force: true }
+        );
+      }
+    }
+  });
+
+  it("rejects benchmark run junctions that resolve outside the ignored root", () => {
+    const outside = mkdtempSync(
+      join(tmpdir(), "ctxo-benchmark-run-outside-")
+    );
+    const link = resolve(
+      ".context-overflow",
+      `benchmark-run-link-${Date.now()}`
+    );
+    try {
+      symlinkSync(outside, link, "junction");
+      expect(
+        benchmarkPathFromRelative(
+          relativeToBenchmarkRoot(link)
+        ).ok
+      ).toBe(false);
+    } finally {
+      rmSync(link, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("persists typed timeout state before bounded cleanup", async () => {
+    const externalRoot = mkdtempSync(
+      join(tmpdir(), "ctxo-benchmark-timeout-source-")
+    );
+    const suiteRoot = resolve(
+      ".context-overflow",
+      `benchmark-timeout-suite-${Date.now()}`
+    );
+    const runRoot = resolve(
+      ".context-overflow",
+      `benchmark-timeout-run-${Date.now()}`
+    );
+    let runId: string | undefined;
+    try {
+      writeManualBenchmarkFixture(externalRoot);
+      const exported = await exportBenchmarkSuite({
+        externalRoot,
+        output: suiteRoot,
+        cases: ["cq02"]
+      });
+      expect(exported.ok).toBe(true);
+      if (!exported.ok) return;
+      const planned = await runBenchmarkLive({
+        suitePath: suiteRoot,
+        output: runRoot,
+        models: ["gpt-5.4-mini"],
+        trials: 1,
+        cases: ["cq02"],
+        dryRun: true,
+        liveFlag: true,
+        environmentLiveOptIn: true,
+        modelTimeoutMs: 10,
+        catalogTimeoutMs: 100,
+        cleanupTimeoutMs: 10
+      });
+      expect(planned.ok).toBe(true);
+      if (!planned.ok) return;
+      runId = planned.value.state.benchmarkRunId;
+      const executed = await runBenchmarkLive({
+        suitePath: suiteRoot,
+        output: runRoot,
+        models: ["gpt-5.4-mini"],
+        trials: 1,
+        cases: ["cq02"],
+        dryRun: false,
+        liveFlag: true,
+        environmentLiveOptIn: true,
+        approvedManifestDigest:
+          planned.value.state.manifest.digest,
+        modelTimeoutMs: 10,
+        catalogTimeoutMs: 100,
+        cleanupTimeoutMs: 10,
+        agentFactory: (authority) =>
+          new FakeBenchmarkAgent(authority, [], {
+            sendPending: true,
+            closePending: true
+          })
+      });
+      expect(executed.ok).toBe(true);
+      expect(
+        executed.ok &&
+          Object.values(executed.value.state.trials).every(
+            (record) =>
+              record.status === "timeout" &&
+              record.errorCode === "IO_ERROR"
+          )
+      ).toBe(true);
     } finally {
       rmSync(externalRoot, { recursive: true, force: true });
       rmSync(suiteRoot, { recursive: true, force: true });
@@ -534,7 +741,7 @@ describe("benchmark live and reporting", () => {
       const exported = await exportBenchmarkSuite({
         externalRoot,
         output: suiteRoot,
-        cases: ["cq03-incomplete", "cq06-missing"]
+        cases: ["cq03-incomplete", "cq06-missing", "luna"]
       });
       expect(exported.ok).toBe(true);
       if (!exported.ok) return;
@@ -550,7 +757,7 @@ describe("benchmark live and reporting", () => {
           "--trials",
           "1",
           "--cases",
-          "cq03-incomplete,cq06-missing",
+          "cq03-incomplete,cq06-missing,luna",
           "--output",
           runRoot,
           "--dry-run"
@@ -570,6 +777,7 @@ describe("benchmark live and reporting", () => {
       };
       runId = manifest.benchmarkRunId;
       expect(manifest.estimatedCallCount).toBe(0);
+      expect(buildBenchmarkReport(runId).ok).toBe(false);
 
       let questioned = false;
       delete process.env.CTXO_LIVE_EVALUATION;
@@ -584,7 +792,7 @@ describe("benchmark live and reporting", () => {
           "--trials",
           "1",
           "--cases",
-          "cq03-incomplete,cq06-missing",
+          "cq03-incomplete,cq06-missing,luna",
           "--output",
           runRoot,
           "--live"
@@ -613,7 +821,7 @@ describe("benchmark live and reporting", () => {
           "--trials",
           "1",
           "--cases",
-          "cq03-incomplete,cq06-missing",
+          "cq03-incomplete,cq06-missing,luna",
           "--output",
           runRoot,
           "--live",
@@ -646,6 +854,9 @@ describe("benchmark live and reporting", () => {
       expect(reported).toBe(0);
       expect(reportOutput.join("")).toContain(
         "# Context Overflow benchmark report"
+      );
+      expect(reportOutput.join("")).toContain(
+        "## Optional helper"
       );
     } finally {
       if (originalOptIn === undefined) {

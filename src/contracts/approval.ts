@@ -13,6 +13,8 @@ export interface ApprovalTarget {
   readonly adapterId: string;
   readonly sessionId?: string;
   readonly modelId?: string;
+  readonly contextTier?: "default" | "long_context";
+  readonly reasoningEffort?: string;
   readonly workingDirectory: string;
   readonly permissions: PermissionEnvelope;
 }

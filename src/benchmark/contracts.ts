@@ -91,6 +91,8 @@ export type BenchmarkTrialArm = EvaluationArm | "task" | "helper";
 
 export interface BenchmarkModelBlock {
   readonly modelId: string;
+  readonly contextTier: "default" | "long_context";
+  readonly reasoningEffort: string | null;
   readonly settingsDigest: string;
   readonly permissionDigest: string;
   readonly adapterId: string;
@@ -121,6 +123,9 @@ export interface BenchmarkReplayManifest {
   readonly sourceRootDigest: string;
   readonly seed: number;
   readonly trials: number;
+  readonly modelTimeoutMs: number;
+  readonly catalogTimeoutMs: number;
+  readonly cleanupTimeoutMs: number;
   readonly liveOptIn: boolean;
   readonly selectedCases: readonly BenchmarkCaseId[];
   readonly modelBlocks: readonly BenchmarkModelBlock[];
@@ -153,8 +158,10 @@ export interface BenchmarkExecutionReceipt {
   readonly payloadSha256: string;
   readonly eventCount: number;
   readonly modelLatencyMs: number;
-  readonly inputTokens: number;
-  readonly outputTokens: number;
+  readonly inputTokens: number | null;
+  readonly outputTokens: number | null;
+  readonly localInputTokens: number;
+  readonly localOutputTokens: number;
   readonly toolOutcomes: number;
   readonly permissionOutcomes: number;
 }
@@ -180,15 +187,15 @@ export interface BenchmarkTrialRecord {
     readonly unsupportedClaims: number;
     readonly contradictions: number;
     readonly abstained: boolean;
-    readonly retrievalTokens: number;
+    readonly retrievalTokens: number | null;
     readonly retrievalCalls: number;
-    readonly retrievalLatencyMs: number;
+    readonly retrievalLatencyMs: number | null;
     readonly preparationLatencyMs: number;
     readonly reviewLatencyMs: number;
-    readonly handoffLatencyMs: number;
+    readonly handoffLatencyMs: number | null;
     readonly modelLatencyMs: number;
-    readonly inputTokens: number;
-    readonly outputTokens: number;
+    readonly inputTokens: number | null;
+    readonly outputTokens: number | null;
     readonly decisions: number;
     readonly tools: number;
     readonly permissions: number;
@@ -228,15 +235,15 @@ export interface BenchmarkTrialScore {
   readonly unsupportedClaims: number;
   readonly contradictions: number;
   readonly abstentionScore: number;
-  readonly retrievalTokens: number;
+  readonly retrievalTokens: number | null;
   readonly retrievalCalls: number;
-  readonly retrievalLatencyMs: number;
+  readonly retrievalLatencyMs: number | null;
   readonly preparationLatencyMs: number;
   readonly reviewLatencyMs: number;
-  readonly handoffLatencyMs: number;
+  readonly handoffLatencyMs: number | null;
   readonly modelLatencyMs: number;
-  readonly inputTokens: number;
-  readonly outputTokens: number;
+  readonly inputTokens: number | null;
+  readonly outputTokens: number | null;
   readonly decisions: number;
   readonly tools: number;
   readonly permissions: number;
@@ -245,6 +252,11 @@ export interface BenchmarkTrialScore {
 export interface BenchmarkModelReport {
   readonly modelId: string;
   readonly scores: readonly BenchmarkTrialScore[];
+  readonly trialStatusCounts: Readonly<
+    Record<BenchmarkTrialStatus, number>
+  >;
+  readonly completePairCount: number;
+  readonly completePairedCaseCount: number;
   readonly aaSelfAgreement: number | null;
   readonly originalMean: number;
   readonly preparedMean: number;
@@ -266,6 +278,18 @@ export interface BenchmarkReport {
   readonly manifestDigest: string;
   readonly suiteDigest: string;
   readonly models: readonly BenchmarkModelReport[];
+  readonly helper?: {
+    readonly modelId?: string;
+    readonly statusCounts: Readonly<
+      Record<BenchmarkTrialStatus, number>
+    >;
+    readonly warnings: readonly string[];
+  };
+  readonly deterministicAdvice: readonly {
+    readonly caseId: BenchmarkCaseId;
+    readonly digest: string;
+    readonly advice: Readonly<Record<string, unknown>>;
+  }[];
   readonly detailedRunPath: string;
   readonly contentSafe: true;
   readonly digest: string;

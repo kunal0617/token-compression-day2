@@ -406,6 +406,50 @@ function eventRecord(event: SdkEvent): AgentEventRecord {
   };
 }
 
+function providerUsage(events: readonly SdkEvent[]) {
+  const usage = events.flatMap((event) => {
+    if (
+      event.type !== "assistant.usage" ||
+      event.data === null ||
+      typeof event.data !== "object"
+    ) {
+      return [];
+    }
+    const data = event.data as Readonly<Record<string, unknown>>;
+    const inputTokens = data.inputTokens;
+    const outputTokens = data.outputTokens;
+    const model = data.model;
+    return typeof inputTokens === "number" &&
+      Number.isFinite(inputTokens) &&
+      inputTokens >= 0 &&
+      typeof outputTokens === "number" &&
+      Number.isFinite(outputTokens) &&
+      outputTokens >= 0 &&
+      typeof model === "string"
+      ? [{ inputTokens, outputTokens, model }]
+      : [];
+  });
+  return usage.length === 0
+    ? undefined
+    : {
+        inputTokens: usage.reduce(
+          (total, item) => total + item.inputTokens,
+          0
+        ),
+        outputTokens: usage.reduce(
+          (total, item) => total + item.outputTokens,
+          0
+        ),
+        modelIds: [...new Set(usage.map((item) => item.model))].sort(
+          (left, right) =>
+            Buffer.compare(
+              Buffer.from(left, "utf8"),
+              Buffer.from(right, "utf8")
+            )
+        )
+      };
+}
+
 function assistantText(event: SdkEvent | undefined): string | undefined {
   if (
     event?.data !== null &&
@@ -418,10 +462,28 @@ function assistantText(event: SdkEvent | undefined): string | undefined {
   return undefined;
 }
 
+async function boundedCleanup(
+  operation: Promise<unknown>,
+  timeoutMs = 5_000
+): Promise<boolean> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      operation.then(() => true, () => false),
+      new Promise<boolean>((resolveTimeout) => {
+        timer = setTimeout(() => resolveTimeout(false), timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 export class OptionalCopilotSdkAdapter {
   readonly metadata = metadata();
   readonly #loader: CopilotSdkLoader;
   readonly #authority: AgentRunScopeAuthority | undefined;
+  readonly #cleanupTimeoutMs: number;
   #client: SdkClientLike | undefined;
   #clientWorkingDirectory: string | undefined;
   #operationTail: Promise<void> = Promise.resolve();
@@ -439,10 +501,13 @@ export class OptionalCopilotSdkAdapter {
 
   constructor(
     loader: CopilotSdkLoader = defaultLoader,
-    authority?: AgentRunScopeAuthority
+    authority?: AgentRunScopeAuthority,
+    options: { readonly cleanupTimeoutMs?: number } = {}
   ) {
     this.#loader = loader;
     this.#authority = authority;
+    this.#cleanupTimeoutMs =
+      options.cleanupTimeoutMs ?? 5_000;
   }
 
   async #exclusive<T>(operation: () => Promise<T>): Promise<T> {
@@ -624,6 +689,7 @@ export class OptionalCopilotSdkAdapter {
       );
       const sdk = this.#sdk as SdkModuleLike;
       const events: AgentEventRecord[] = [];
+      const rawEvents: SdkEvent[] = [];
       const tools = scopedToolsForPermissions(
         sdk,
         request.readScope,
@@ -642,7 +708,20 @@ export class OptionalCopilotSdkAdapter {
         modelId: approved.subject.target.modelId ?? null,
         workingDirectory: approved.subject.target.workingDirectory,
         permissions: approved.subject.target.permissions,
-        readScopeDigest: scopeDigest.value
+        readScopeDigest: scopeDigest.value,
+        contextTier:
+          approved.subject.target.contextTier ?? null,
+        reasoningEffort:
+          approved.subject.target.reasoningEffort ?? null
+      });
+      const applicationSettingsDigest = canonicalJsonDigest({
+        modelId: approved.subject.target.modelId,
+        contextTier:
+          approved.subject.target.contextTier ?? null,
+        reasoningEffort:
+          approved.subject.target.reasoningEffort ?? null,
+        permissions: approved.subject.target.permissions,
+        availableTools: toolNames
       });
       const baseConfig = {
         clientName: "context-overflow",
@@ -654,10 +733,25 @@ export class OptionalCopilotSdkAdapter {
         },
         tools,
         availableTools: toolNames,
-        onEvent: (event: SdkEvent) => events.push(eventRecord(event)),
+        onEvent: (event: SdkEvent) => {
+          rawEvents.push(event);
+          events.push(eventRecord(event));
+        },
         onPermissionRequest: permissionHandler(
           approved.subject.target.permissions
-        )
+        ),
+        ...(approved.subject.target.contextTier === undefined
+          ? {}
+          : {
+              contextTier:
+                approved.subject.target.contextTier
+            }),
+        ...(approved.subject.target.reasoningEffort === undefined
+          ? {}
+          : {
+              reasoningEffort:
+                approved.subject.target.reasoningEffort
+            })
       };
       const targetSessionId = approved.subject.target.sessionId;
       const cached =
@@ -716,7 +810,10 @@ export class OptionalCopilotSdkAdapter {
       let aborted = false;
       let timer: NodeJS.Timeout | undefined;
       const unsubscribe = session.on((event) =>
-        events.push(eventRecord(event))
+        {
+          rawEvents.push(event);
+          events.push(eventRecord(event));
+        }
       );
       try {
         const timeout = new Promise<never>((_, reject) => {
@@ -730,6 +827,7 @@ export class OptionalCopilotSdkAdapter {
           timeout
         ]);
         const responseText = assistantText(response);
+        const usage = providerUsage(rawEvents);
         return success({
           runId: request.runId,
           sessionId: session.sessionId,
@@ -737,8 +835,12 @@ export class OptionalCopilotSdkAdapter {
             ? {}
             : { modelId: approved.subject.target.modelId }),
           applicationPayloadSha256: sha256Base64Url(approved.bytes),
+          applicationSettingsDigest,
           permissions: approved.subject.target.permissions,
           events,
+          ...(usage === undefined
+            ? {}
+            : { providerUsage: usage }),
           ...(responseText === undefined ? {} : { responseText }),
           timedOut,
           aborted,
@@ -746,12 +848,17 @@ export class OptionalCopilotSdkAdapter {
         });
       } catch (error) {
         if (timedOut) {
-          await session.abort();
-          aborted = true;
-          return failure("IO_ERROR", "Copilot request timed out and was aborted", {
+          const abortCompleted = await boundedCleanup(
+            session.abort(),
+            this.#cleanupTimeoutMs
+          );
+          aborted = abortCompleted;
+          return failure("IO_ERROR", "Copilot request timed out; abort was attempted", {
             sessionId: session.sessionId,
+            reason: "timeout",
             timedOut,
-            aborted
+            aborted,
+            abortCompleted
           });
         }
         return failure("IO_ERROR", "Copilot request failed", {
@@ -773,11 +880,42 @@ export class OptionalCopilotSdkAdapter {
     return this.#exclusive(async () => {
       try {
         for (const cached of this.#sessions.values()) {
-          await cached.session.disconnect();
+          const disconnected = await boundedCleanup(
+            cached.session.disconnect(),
+            this.#cleanupTimeoutMs
+          );
+          if (!disconnected) {
+            return failure(
+              "IO_ERROR",
+              "Copilot SDK session cleanup timed out",
+              { reason: "cleanup-timeout" }
+            );
+          }
         }
         this.#sessions.clear();
         if (this.#client !== undefined) {
-          const errors = await this.#client.stop();
+          let errors: Error[] | undefined;
+          let timer: NodeJS.Timeout | undefined;
+          try {
+            errors = await Promise.race([
+              this.#client.stop(),
+              new Promise<undefined>((resolveTimeout) => {
+                timer = setTimeout(
+                  () => resolveTimeout(undefined),
+                  this.#cleanupTimeoutMs
+                );
+              })
+            ]);
+          } finally {
+            if (timer !== undefined) clearTimeout(timer);
+          }
+          if (errors === undefined) {
+            return failure(
+              "IO_ERROR",
+              "Copilot SDK client cleanup timed out",
+              { reason: "cleanup-timeout" }
+            );
+          }
           if (errors.length > 0) {
             return failure("IO_ERROR", "Copilot SDK cleanup reported errors", {
               errors: errors.map((error) => error.message)

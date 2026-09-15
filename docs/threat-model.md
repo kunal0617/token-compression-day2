@@ -53,6 +53,9 @@
   future trusted capture/merge attestation.
 - SDK operations are serialized so cached-session sends, event subscriptions,
   and permission/scope reconfiguration cannot overlap.
+- Benchmark suite/run/index roots are canonicalized against the workspace-owned
+  `.context-overflow` directory. Junction/symlink anchors, parents, final paths,
+  store/payload swaps, and temporary-file link attacks fail closed.
 - Hosted evidence helpers must attest the enforced empty-mode client
   configuration and isolated working/base directory before a session starts.
 - Application timeout calls `session.abort()`; stopping the wait is not treated

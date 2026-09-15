@@ -90,11 +90,19 @@ export function benchmarkSdkRuntimeIdentity(): Result<{
   readonly protocolDigest: string;
 }> {
   try {
-    const entry = require.resolve("@github/copilot-sdk");
-    let packageRoot = dirname(entry);
-    while (
-      !existsSync(resolve(packageRoot, "package.json"))
-    ) {
+    const cjsEntry = require.resolve("@github/copilot-sdk");
+    let packageRoot = dirname(cjsEntry);
+    while (true) {
+      const candidatePackage = resolve(
+        packageRoot,
+        "package.json"
+      );
+      if (existsSync(candidatePackage)) {
+        const candidate = JSON.parse(
+          readFileSync(candidatePackage, "utf8")
+        ) as { name?: string };
+        if (candidate.name === "@github/copilot-sdk") break;
+      }
       const parent = dirname(packageRoot);
       if (parent === packageRoot) {
         throw new Error("SDK package root not found");
@@ -105,17 +113,104 @@ export function benchmarkSdkRuntimeIdentity(): Result<{
       packageRoot,
       "package.json"
     );
+    const packageBytes = readFileSync(packagePath);
+    const packageJson = JSON.parse(
+      packageBytes.toString("utf8")
+    ) as {
+      exports?: {
+        "."?: {
+          import?: { default?: string };
+        };
+      };
+    };
+    const esmRelative =
+      packageJson.exports?.["."]?.import?.default;
+    if (esmRelative === undefined) {
+      throw new Error("SDK ESM entry is unavailable");
+    }
+    const esmEntry = resolve(packageRoot, esmRelative);
     const protocolPath = resolve(
-      dirname(entry),
+      packageRoot,
+      "dist",
       "sdkProtocolVersion.js"
     );
-    const packageBytes = readFileSync(packagePath);
-    const entryBytes = readFileSync(entry);
+    const cliVersionPath = resolve(
+      packageRoot,
+      "dist",
+      "cliVersion.js"
+    );
+    const cliVersionBytes = readFileSync(cliVersionPath);
+    const useCliNpmPackage =
+      /COPILOT_CLI_USE_NPM_PACKAGE\s*=\s*true/.test(
+        cliVersionBytes.toString("utf8")
+      );
+    const platform =
+      process.platform === "linux"
+        ? `linux-${process.arch}`
+        : `${process.platform}-${process.arch}`;
+    const explicitRuntime = process.env.COPILOT_CLI_PATH;
+    let wrapperPath: string;
+    let runtimeNodePath: string;
+    if (explicitRuntime !== undefined) {
+      wrapperPath = resolve(explicitRuntime);
+      const adjacent = resolve(
+        dirname(wrapperPath),
+        "runtime.node"
+      );
+      runtimeNodePath = existsSync(adjacent)
+        ? adjacent
+        : resolve(
+            dirname(wrapperPath),
+            "prebuilds",
+            platform,
+            "runtime.node"
+          );
+    } else {
+      const runtimePackage = useCliNpmPackage
+        ? `@github/copilot-${platform}`
+        : `@github/copilot-sdk-${platform}`;
+      const searchPaths =
+        require.resolve.paths(runtimePackage) ?? [];
+      const runtimeRoot = searchPaths
+        .map((base) =>
+          resolve(
+            base,
+            ...runtimePackage.split("/")
+          )
+        )
+        .find((candidate) =>
+          existsSync(resolve(candidate, "package.json"))
+        );
+      if (runtimeRoot === undefined) {
+        throw new Error("SDK runtime package is unavailable");
+      }
+      const prebuild = resolve(
+        runtimeRoot,
+        "prebuilds",
+        platform
+      );
+      wrapperPath = resolve(
+        prebuild,
+        process.platform === "win32"
+          ? "copilot-runtime.exe"
+          : "copilot-runtime"
+      );
+      runtimeNodePath = resolve(prebuild, "runtime.node");
+    }
+    const cjsEntryBytes = readFileSync(cjsEntry);
+    const esmEntryBytes = readFileSync(esmEntry);
     const protocolBytes = readFileSync(protocolPath);
+    const wrapperBytes = readFileSync(wrapperPath);
+    const runtimeNodeBytes = readFileSync(runtimeNodePath);
     return success({
       executableDigest: canonicalJsonDigest({
         packageSha256: sha256Base64Url(packageBytes),
-        entrySha256: sha256Base64Url(entryBytes),
+        cjsEntrySha256: sha256Base64Url(cjsEntryBytes),
+        esmEntrySha256: sha256Base64Url(esmEntryBytes),
+        wrapperSha256: sha256Base64Url(wrapperBytes),
+        runtimeNodeSha256: sha256Base64Url(runtimeNodeBytes),
+        cliVersionSha256: sha256Base64Url(cliVersionBytes),
+        overrideActive: explicitRuntime !== undefined,
         adapterDigest: benchmarkSdkMetadata.digest
       }),
       protocolDigest: canonicalJsonDigest({

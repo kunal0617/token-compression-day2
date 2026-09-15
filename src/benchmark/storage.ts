@@ -28,6 +28,10 @@ import {
   writeCanonicalNew
 } from "./io.js";
 import {
+  validatedBenchmarkRoot,
+  validatedContainedRoot
+} from "./io.js";
+import {
   canonicalJson,
   canonicalJsonDigest
 } from "../core/canonical.js";
@@ -200,21 +204,9 @@ export function loadBenchmarkSuite(
         "Benchmark suite root must be a real directory"
       );
     }
-    const canonicalBenchmarkRoot = realpathSync(benchmarkRoot());
-    const root = realpathSync(lexicalRoot);
-    const canonicalChild = relative(
-      canonicalBenchmarkRoot,
-      root
-    );
-    if (
-      canonicalChild.startsWith("..") ||
-      isAbsolute(canonicalChild)
-    ) {
-      return failure(
-        "INTEGRITY_ERROR",
-        "Benchmark suite resolves outside .context-overflow"
-      );
-    }
+    const rootResult = validatedContainedRoot(lexicalRoot);
+    if (!rootResult.ok) return rootResult;
+    const root = rootResult.value;
     const manifestPath = resolve(root, "benchmark-suite.json");
     const stats = lstatSync(manifestPath);
     if (stats.isSymbolicLink() || !stats.isFile()) {
@@ -337,7 +329,11 @@ export function registerBenchmarkRun(
 ): Result<void> {
   const indexRoot = resolve(benchmarkRoot(), "benchmark-index");
   try {
+    const benchmark = validatedBenchmarkRoot();
+    if (!benchmark.ok) return benchmark;
     mkdirSync(indexRoot, { recursive: true });
+    const validatedIndex = validatedContainedRoot(indexRoot);
+    if (!validatedIndex.ok) return validatedIndex;
   } catch (error) {
     return failure("IO_ERROR", "Unable to create benchmark index", {
       cause: error instanceof Error ? error.message : String(error)
@@ -397,6 +393,14 @@ export function locateBenchmarkRun(
     `${runId}.json`
   );
   try {
+    const benchmark = validatedBenchmarkRoot();
+    if (!benchmark.ok) return benchmark;
+    const indexRoot = resolve(
+      benchmark.value,
+      "benchmark-index"
+    );
+    const validatedIndex = validatedContainedRoot(indexRoot);
+    if (!validatedIndex.ok) return validatedIndex;
     const stats = lstatSync(indexPath);
     if (stats.isSymbolicLink() || !stats.isFile()) {
       return failure(

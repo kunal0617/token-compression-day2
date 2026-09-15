@@ -62,3 +62,8 @@ The production comparative workflow is documented in
 prepared payload pairs, creates a canonical approval-bound call plan, executes
 fresh-session model trials with resumable terminal state, and emits content-safe
 per-model JSON/Markdown/CSV reports.
+
+Benchmark runtime identity includes the actual installed SDK entries, effective
+runtime wrapper and native module (including `COPILOT_CLI_PATH` overrides), and
+protocol implementation. Provider token usage is reported only when emitted by
+the SDK; otherwise it remains explicitly unavailable.

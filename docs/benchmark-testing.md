@@ -65,11 +65,16 @@ For noninteractive automation, first review the dry-run manifest and pass the
 same digest with `--approve-manifest <digest>`.
 
 Every live trial uses a fresh empty-mode Copilot session and an exact pinned
-model. Permissions default to evidence/source/network only; shell and write are
-disabled. The runner rehashes payloads before each trial, scans outbound and
-response bytes, aborts on timeout, and persists terminal trial state before
-continuing. Resume skips completed, failed, timed-out, blocked, and interrupted
-trials, preventing duplicate model calls.
+model. The replay manifest and execution receipt bind the effective installed
+SDK ESM/CommonJS entries, runtime wrapper, native `runtime.node`, protocol
+implementation, model, context tier, permissions, and applied session settings.
+The exact model must be present and enabled in the live catalog. Permissions
+default to evidence/source/network only; shell and write are disabled. The
+runner rehashes payloads before each trial, scans outbound and response bytes,
+persists structured terminal timeout state, and bounds abort/disconnect/client
+cleanup separately. Resume compares the complete runtime configuration and
+skips completed, failed, timed-out, blocked, and interrupted trials, preventing
+duplicate model calls.
 
 `cq03-incomplete` and `cq06-missing` are scored as deterministic correct
 abstentions without model calls. `cq03-complete` and `cq06-observed` run live.
@@ -90,6 +95,14 @@ include A/A self agreement, A/B paired metrics, evidence/failure/citation
 recall, abstention, unsupported claims, contradictions, retrieval and phase
 latency, input/output token counts, decisions/tools/permissions, seeded
 confidence intervals, effect-size warnings, and reporting floors.
+
+Recoverability is measured only from facts present in the exact payload (or a
+successful authorized retrieval); unavailable retrieval/handoff/provider-token
+measurements are recorded as unavailable rather than zero. Local `o200k_base`
+counts remain local diagnostics and are never presented as provider usage.
+Reports require a terminal state with every trial accounted for, calculate arm
+means from complete A/B pairs only, and atomically replace prior generated
+formats.
 
 The shareable report contains no prompts or responses. It links only to the
 relative ignored run directory. Detailed responses remain local and are

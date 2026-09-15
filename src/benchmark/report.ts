@@ -264,6 +264,8 @@ function modelReport(
     pairs.set(key, pair);
   }
   const differences: number[] = [];
+  const completeOriginalScores: number[] = [];
+  const completePreparedScores: number[] = [];
   let completePairCount = 0;
   let preparedWins = 0;
   let originalWins = 0;
@@ -278,17 +280,13 @@ function modelReport(
     completePairCount += 1;
     const difference =
       composite(pair.prepared) - composite(pair.original);
+    completeOriginalScores.push(composite(pair.original));
+    completePreparedScores.push(composite(pair.prepared));
     differences.push(difference);
     if (difference > 0) preparedWins += 1;
     else if (difference < 0) originalWins += 1;
     else ties += 1;
   }
-  const original = scores
-    .filter((value) => value.arm === "original")
-    .map(composite);
-  const prepared = scores
-    .filter((value) => value.arm === "prepared")
-    .map(composite);
   const deviation = standardDeviation(differences);
   const differenceMean = mean(differences);
   const effectSizeDz =
@@ -350,8 +348,8 @@ function modelReport(
     completePairCount,
     completePairedCaseCount,
     aaSelfAgreement: selfAgreement(state, modelId),
-    originalMean: mean(original),
-    preparedMean: mean(prepared),
+    originalMean: mean(completeOriginalScores),
+    preparedMean: mean(completePreparedScores),
     meanDifference: differenceMean,
     effectSizeDz,
     bootstrap95: bootstrap(
@@ -654,33 +652,33 @@ export function benchmarkReportMarkdown(
         ""
       );
     }
-    if (report.helper !== undefined) {
-      lines.push(
-        "## Optional helper",
-        "",
-        `- Model: ${report.helper.modelId ?? "not configured"}`,
-        `- Statuses: ${Object.entries(report.helper.statusCounts)
-          .map(([status, count]) => `${status}=${count}`)
-          .join(", ")}`,
-        ...report.helper.warnings.map(
-          (warning) => `- Warning: ${warning}`
-        ),
-        ""
-      );
-    }
-    if (report.deterministicAdvice.length > 0) {
-      lines.push(
-        "## Deterministic model advice",
-        "",
-        ...report.deterministicAdvice.map(
-          (item) =>
-            `- ${item.caseId}: \`${item.digest}\` ${JSON.stringify(
-              item.advice
-            )}`
-        ),
-        ""
-      );
-    }
+  }
+  if (report.helper !== undefined) {
+    lines.push(
+      "## Optional helper",
+      "",
+      `- Model: ${report.helper.modelId ?? "not configured"}`,
+      `- Statuses: ${Object.entries(report.helper.statusCounts)
+        .map(([status, count]) => `${status}=${count}`)
+        .join(", ")}`,
+      ...report.helper.warnings.map(
+        (warning) => `- Warning: ${warning}`
+      ),
+      ""
+    );
+  }
+  if (report.deterministicAdvice.length > 0) {
+    lines.push(
+      "## Deterministic model advice",
+      "",
+      ...report.deterministicAdvice.map(
+        (item) =>
+          `- ${item.caseId}: \`${item.digest}\` ${JSON.stringify(
+            item.advice
+          )}`
+      ),
+      ""
+    );
   }
   return lines.join("\n");
 }
@@ -698,10 +696,14 @@ export function benchmarkReportCsv(
   report: BenchmarkReport
 ): string {
   const header = [
+    "record_type",
     "model",
     "case",
     "arm",
     "trial",
+    "status",
+    "count",
+    "advice_digest",
     "task_success",
     "visible_recall",
     "recoverable_recall",
@@ -725,13 +727,17 @@ export function benchmarkReportCsv(
   ];
   return [
     header.map(csvCell).join(","),
-    ...report.models.flatMap((model) =>
-      model.scores.map((value) =>
+    ...report.models.flatMap((model) => [
+      ...model.scores.map((value) =>
         [
+          "score",
           model.modelId,
           value.caseId,
           value.arm,
           value.trialNumber,
+          "completed",
+          1,
+          "",
           value.taskSuccess,
           value.visibleEvidenceRecall,
           value.recoverableEvidenceRecall,
@@ -755,7 +761,58 @@ export function benchmarkReportCsv(
         ]
           .map(csvCell)
           .join(",")
-      )
+      ),
+      ...Object.entries(model.trialStatusCounts)
+        .filter(([, count]) => count > 0)
+        .map(([status, count]) =>
+          [
+            "terminal-status",
+            model.modelId,
+            "",
+            "",
+            "",
+            status,
+            count,
+            "",
+            ...Array.from({ length: 20 }, () => "")
+          ]
+            .map(csvCell)
+            .join(",")
+        )
+    ]),
+    ...(report.helper === undefined
+      ? []
+      : Object.entries(report.helper.statusCounts)
+          .filter(([, count]) => count > 0)
+          .map(([status, count]) =>
+            [
+              "helper-status",
+              report.helper?.modelId ?? "",
+              "luna",
+              "helper",
+              "",
+              status,
+              count,
+              "",
+              ...Array.from({ length: 20 }, () => "")
+            ]
+              .map(csvCell)
+              .join(",")
+          )),
+    ...report.deterministicAdvice.map((item) =>
+      [
+        "deterministic-advice",
+        "",
+        item.caseId,
+        "task",
+        "",
+        "recorded",
+        1,
+        item.digest,
+        ...Array.from({ length: 20 }, () => "")
+      ]
+        .map(csvCell)
+        .join(",")
     )
   ].join("\n");
 }

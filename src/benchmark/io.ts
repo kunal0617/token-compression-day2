@@ -6,13 +6,16 @@ import {
   readFileSync,
   realpathSync,
   renameSync,
+  rmSync,
   statSync,
   writeFileSync,
   closeSync,
   fsyncSync,
   existsSync
 } from "node:fs";
+import { randomUUID } from "node:crypto";
 import {
+  basename,
   dirname,
   isAbsolute,
   relative,
@@ -32,6 +35,74 @@ function normalized(path: string): string {
 
 export function benchmarkRoot(): string {
   return resolve(".context-overflow");
+}
+
+export function validateCanonicalBenchmarkAnchor(
+  lexicalRoot: string,
+  workspaceRoot: string
+): Result<string> {
+  try {
+    const stats = lstatSync(lexicalRoot);
+    if (stats.isSymbolicLink() || !stats.isDirectory()) {
+      return failure(
+        "INTEGRITY_ERROR",
+        "Benchmark root must be a workspace-owned real directory"
+      );
+    }
+    const workspace = realpathSync(workspaceRoot);
+    const canonical = realpathSync(lexicalRoot);
+    const expected = resolve(workspace, ".context-overflow");
+    return normalized(canonical) === normalized(expected)
+      ? success(canonical)
+      : failure(
+          "INTEGRITY_ERROR",
+          "Benchmark root resolves outside the workspace"
+        );
+  } catch (error) {
+    return failure("IO_ERROR", "Unable to validate benchmark root", {
+      cause: error instanceof Error ? error.message : String(error)
+    });
+  }
+}
+
+export function validatedBenchmarkRoot(): Result<string> {
+  return validateCanonicalBenchmarkAnchor(
+    benchmarkRoot(),
+    process.cwd()
+  );
+}
+
+export function validatedContainedRoot(
+  root: string
+): Result<string> {
+  const benchmark = validatedBenchmarkRoot();
+  if (!benchmark.ok) return benchmark;
+  try {
+    const lexical = resolve(root);
+    const stats = lstatSync(lexical);
+    if (stats.isSymbolicLink() || !stats.isDirectory()) {
+      return failure(
+        "INTEGRITY_ERROR",
+        "Benchmark contained root must be a real directory"
+      );
+    }
+    const canonical = realpathSync(lexical);
+    const child = relative(benchmark.value, canonical);
+    return !child.startsWith("..") && !isAbsolute(child)
+      ? success(canonical)
+      : failure(
+          "INTEGRITY_ERROR",
+          "Benchmark contained root resolves outside .context-overflow"
+        );
+  } catch (error) {
+    return failure(
+      "IO_ERROR",
+      "Unable to validate benchmark contained root",
+      {
+        cause: error instanceof Error ? error.message : String(error)
+      }
+    );
+  }
 }
 
 export function insideBenchmarkRoot(path: string): boolean {
@@ -57,13 +128,8 @@ export function prepareOutputDirectory(
   }
   try {
     mkdirSync(benchmarkRoot(), { recursive: true });
-    const root = realpathSync(benchmarkRoot());
-    if (!insideBenchmarkRoot(root)) {
-      return failure(
-        "INTEGRITY_ERROR",
-        "Benchmark root resolution escaped the workspace"
-      );
-    }
+    const root = validatedBenchmarkRoot();
+    if (!root.ok) return root;
     try {
       const stats = lstatSync(absolute);
       if (stats.isSymbolicLink() || !stats.isDirectory()) {
@@ -95,14 +161,7 @@ export function prepareOutputDirectory(
       if (!safe.ok) return safe;
       mkdirSync(absolute, { recursive: true });
     }
-    const canonical = realpathSync(absolute);
-    if (!insideBenchmarkRoot(canonical)) {
-      return failure(
-        "INTEGRITY_ERROR",
-        "Benchmark output resolution escaped .context-overflow"
-      );
-    }
-    return success(canonical);
+    return validatedContainedRoot(absolute);
   } catch (error) {
     return failure("IO_ERROR", "Unable to prepare benchmark output", {
       cause: error instanceof Error ? error.message : String(error)
@@ -133,7 +192,9 @@ export function resolveInside(
       );
   }
   try {
-    const canonicalRoot = realpathSync(root);
+    const containedRoot = validatedContainedRoot(root);
+    if (!containedRoot.ok) return containedRoot;
+    const canonicalRoot = containedRoot.value;
     let cursor = absolute;
     while (!existsSync(cursor)) {
       const parent = dirname(cursor);
@@ -216,17 +277,27 @@ export function writeCanonicalAtomic(
 ): Result<void> {
   const resolved = resolveInside(root, relativePath);
   if (!resolved.ok) return resolved;
-  const temporary = `${resolved.value}.tmp`;
+  const temporary = resolve(
+    dirname(resolved.value),
+    `.${basename(resolved.value)}.${randomUUID()}.tmp`
+  );
   try {
     mkdirSync(dirname(resolved.value), { recursive: true });
-    writeFileSync(
-      temporary,
-      `${canonicalJson(value)}\n`,
-      { encoding: "utf8", flag: "w" }
-    );
+    const fd = openSync(temporary, "wx");
+    try {
+      writeFileSync(
+        fd,
+        `${canonicalJson(value)}\n`,
+        "utf8"
+      );
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
     renameSync(temporary, resolved.value);
     return success(undefined);
   } catch (error) {
+    rmSync(temporary, { force: true });
     return failure(
       "IO_ERROR",
       "Unable to atomically write benchmark state",
@@ -245,10 +316,13 @@ export function writeBytesAtomic(
 ): Result<void> {
   const resolved = resolveInside(root, relativePath);
   if (!resolved.ok) return resolved;
-  const temporary = `${resolved.value}.tmp`;
+  const temporary = resolve(
+    dirname(resolved.value),
+    `.${basename(resolved.value)}.${randomUUID()}.tmp`
+  );
   try {
     mkdirSync(dirname(resolved.value), { recursive: true });
-    const fd = openSync(temporary, "w");
+    const fd = openSync(temporary, "wx");
     try {
       writeFileSync(fd, bytes);
       fsyncSync(fd);
@@ -258,6 +332,7 @@ export function writeBytesAtomic(
     renameSync(temporary, resolved.value);
     return success(undefined);
   } catch (error) {
+    rmSync(temporary, { force: true });
     return failure(
       "IO_ERROR",
       "Unable to atomically write benchmark file",
@@ -333,7 +408,9 @@ export function benchmarkPathFromRelative(
         "Benchmark indexed run is not a real directory"
       );
     }
-    const canonicalRoot = realpathSync(benchmarkRoot());
+    const benchmark = validatedBenchmarkRoot();
+    if (!benchmark.ok) return benchmark;
+    const canonicalRoot = benchmark.value;
     const canonical = realpathSync(absolute);
     const child = relative(canonicalRoot, canonical);
     return !child.startsWith("..") && !isAbsolute(child)

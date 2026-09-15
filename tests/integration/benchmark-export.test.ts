@@ -13,7 +13,10 @@ import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { exportBenchmarkSuite } from "../../src/benchmark/export.js";
-import { prepareOutputDirectory } from "../../src/benchmark/io.js";
+import {
+  prepareOutputDirectory,
+  validateCanonicalBenchmarkAnchor
+} from "../../src/benchmark/io.js";
 import { loadBenchmarkSuite } from "../../src/benchmark/storage.js";
 import { runCli } from "../../src/main.js";
 import { writeManualBenchmarkFixture } from "../helpers/manual-benchmark-fixture.js";
@@ -240,6 +243,29 @@ describe("benchmark export", () => {
     } finally {
       rmSync(externalRoot, { recursive: true, force: true });
       rmSync(invalidOutput, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a benchmark anchor that is itself a junction", () => {
+    const workspace = mkdtempSync(
+      join(tmpdir(), "ctxo-benchmark-workspace-")
+    );
+    const outside = mkdtempSync(
+      join(tmpdir(), "ctxo-benchmark-anchor-outside-")
+    );
+    const anchor = join(workspace, ".context-overflow");
+    try {
+      symlinkSync(outside, anchor, "junction");
+      expect(
+        validateCanonicalBenchmarkAnchor(
+          anchor,
+          workspace
+        ).ok
+      ).toBe(false);
+    } finally {
+      rmSync(anchor, { recursive: true, force: true });
+      rmSync(workspace, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
     }
   });
 });

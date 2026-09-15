@@ -1,6 +1,7 @@
 import {
   mkdirSync,
-  readFileSync
+  readFileSync,
+  rmSync
 } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -295,18 +296,28 @@ export async function exportBenchmarkSuite(input: {
   readonly cases?: readonly string[];
   readonly now?: string;
 }): Promise<Result<BenchmarkSuite>> {
+  const cases = selectedCaseIds(input.cases);
+  if (!cases.ok) return cases;
+  let adapter: ExternalManualParityAdapter;
+  try {
+    adapter = new ExternalManualParityAdapter({
+      root: input.externalRoot,
+      maxFileBytes: 2 * 1024 * 1024,
+      maxTotalBytes: 24 * 1024 * 1024,
+      maxDurationMs: 60_000
+    });
+  } catch {
+    return failure(
+      "IO_ERROR",
+      "External benchmark root is unavailable"
+    );
+  }
   const output = prepareOutputDirectory(input.output, {
     allowExisting: false
   });
   if (!output.ok) return output;
-  const cases = selectedCaseIds(input.cases);
-  if (!cases.ok) return cases;
-  const adapter = new ExternalManualParityAdapter({
-    root: input.externalRoot,
-    maxFileBytes: 2 * 1024 * 1024,
-    maxTotalBytes: 24 * 1024 * 1024,
-    maxDurationMs: 60_000
-  });
+  let completed = false;
+  try {
   const exported: BenchmarkExportCase[] = [];
   const sourceIdentities: {
     caseId: BenchmarkCaseId;
@@ -324,16 +335,26 @@ export async function exportBenchmarkSuite(input: {
     mkdirSync(caseRoot, { recursive: true });
     const storePath = join(caseRoot, "context.sqlite");
     const preparationStartedAt = performance.now();
-    const prepared = await prepareContext({
-      promptText: benchmarkInput.value.prompt,
-      contextTexts: benchmarkInput.value.artifacts.map(
+    let contextTexts: { label: string; text: string }[];
+    try {
+      contextTexts = benchmarkInput.value.artifacts.map(
         (artifact) => ({
           label: artifact.label,
           text: new TextDecoder("utf-8", {
             fatal: true
           }).decode(artifact.bytes)
         })
-      ),
+      );
+    } catch {
+      return failure(
+        "INVALID_UTF8",
+        "External benchmark case is not valid UTF-8",
+        { caseId }
+      );
+    }
+    const prepared = await prepareContext({
+      promptText: benchmarkInput.value.prompt,
+      contextTexts,
       storePath
     });
     if (!prepared.ok) return prepared;
@@ -415,12 +436,17 @@ export async function exportBenchmarkSuite(input: {
       );
     }
     const advice = caseAdvice;
+    const storeIdentity = existingIdentity(
+      output.value,
+      `cases/${caseId}/context.sqlite`
+    );
     const exportedUnsigned = {
       caseId,
       contract: benchmarkInput.value.contract,
       kind: benchmarkInput.value.kind,
       runId: prepared.value.package.runId,
       storePath: `cases/${caseId}/context.sqlite`,
+      store: storeIdentity,
       original: original.value,
       prepared: reduced.value,
       receipt: receipt.value,
@@ -463,5 +489,22 @@ export async function exportBenchmarkSuite(input: {
     "benchmark-suite.json",
     suite
   );
-  return written.ok ? success(suite) : written;
+  if (!written.ok) return written;
+  completed = true;
+  return success(suite);
+  } catch (error) {
+    return failure(
+      "INTERNAL_ERROR",
+      "Benchmark export failed",
+      {
+        errorDigest: canonicalJsonDigest(
+          error instanceof Error ? error.message : String(error)
+        )
+      }
+    );
+  } finally {
+    if (!completed) {
+      rmSync(output.value, { recursive: true, force: true });
+    }
+  }
 }

@@ -64,6 +64,7 @@ export interface BenchmarkExportCase {
   readonly kind: BenchmarkCaseKind;
   readonly runId: string;
   readonly storePath: string;
+  readonly store: BenchmarkFileIdentity;
   readonly original: BenchmarkFileIdentity;
   readonly prepared: BenchmarkFileIdentity;
   readonly receipt: BenchmarkFileIdentity;

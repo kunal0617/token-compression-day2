@@ -2,9 +2,11 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
-  readFileSync
+  readFileSync,
+  realpathSync
 } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
+import { isAbsolute, relative } from "node:path";
 
 import type {
   BenchmarkCaseContract,
@@ -13,6 +15,7 @@ import type {
   BenchmarkRunState,
   BenchmarkSuite
 } from "./contracts.js";
+import type { ContextReceipt } from "../contracts/types.js";
 import {
   benchmarkPathFromRelative,
   benchmarkRoot,
@@ -29,6 +32,12 @@ import {
   canonicalJsonDigest
 } from "../core/canonical.js";
 import { failure, success, type Result } from "../core/result.js";
+import { ContextStore } from "../storage/store.js";
+import { renderContext } from "../render/render.js";
+import {
+  snapshotsFromManifest,
+  verifyStoredRun
+} from "../validate/validate.js";
 
 function parseCanonical<T>(
   bytes: Buffer,
@@ -77,6 +86,7 @@ function validateCase(
     );
   }
   for (const identity of [
+    item.store,
     item.original,
     item.prepared,
     item.receipt,
@@ -85,16 +95,79 @@ function validateCase(
     const valid = validateIdentity(root, identity);
     if (!valid.ok) return valid;
   }
-  const store = resolveInside(root, item.storePath);
-  if (!store.ok) return store;
+  const storePath = resolveInside(root, item.storePath);
+  if (!storePath.ok) return storePath;
   try {
-    const stats = lstatSync(store.value);
-    return stats.isFile() && !stats.isSymbolicLink()
-      ? success(undefined)
-      : failure(
+    const stats = lstatSync(storePath.value);
+    if (!stats.isFile() || stats.isSymbolicLink()) {
+      return failure(
           "INTEGRITY_ERROR",
           "Benchmark case store is not a regular file"
         );
+    }
+    const before = readBoundBytes(root, item.store);
+    if (!before.ok) return before;
+    const database = new ContextStore(storePath.value);
+    try {
+      const verified = verifyStoredRun(database, item.runId);
+      if (!verified.ok) return verified;
+      const receipt = database.inspectReceipt(item.runId);
+      if (!receipt.ok) return receipt;
+      const receiptBytes = readBoundBytes(root, item.receipt);
+      if (!receiptBytes.ok) return receiptBytes;
+      const parsedReceipt = parseCanonical<ContextReceipt>(
+        receiptBytes.value,
+        "Benchmark receipt"
+      );
+      if (
+        !parsedReceipt.ok ||
+        canonicalJson(parsedReceipt.value) !==
+          canonicalJson(receipt.value) ||
+        receipt.value.readiness !== item.readiness ||
+        verified.value.manifestSha256 !== item.manifestSha256
+      ) {
+        return failure(
+          "INTEGRITY_ERROR",
+          "Benchmark store receipt or manifest binding is invalid"
+        );
+      }
+      const prepared = readBoundBytes(root, item.prepared);
+      if (
+        !prepared.ok ||
+        !prepared.value.equals(verified.value.preparedBytes)
+      ) {
+        return failure(
+          "INTEGRITY_ERROR",
+          "Benchmark prepared payload does not match the store"
+        );
+      }
+      const artifactBytes = database.loadArtifactBytes(item.runId);
+      if (!artifactBytes.ok) return artifactBytes;
+      const snapshots = snapshotsFromManifest(
+        verified.value.manifest,
+        artifactBytes.value
+      );
+      if (!snapshots.ok) return snapshots;
+      const reconstructedOriginal = renderContext(
+        snapshots.value,
+        new Map<string, readonly never[]>(),
+        verified.value.manifest.evidence
+      ).preparedBytes;
+      const original = readBoundBytes(root, item.original);
+      if (
+        !original.ok ||
+        !original.value.equals(reconstructedOriginal)
+      ) {
+        return failure(
+          "INTEGRITY_ERROR",
+          "Benchmark original payload does not match the store"
+        );
+      }
+    } finally {
+      database.close();
+    }
+    const after = readBoundBytes(root, item.store);
+    return after.ok ? success(undefined) : after;
   } catch {
     return failure(
       "IO_ERROR",
@@ -109,15 +182,40 @@ export function loadBenchmarkSuite(
   readonly root: string;
   readonly suite: BenchmarkSuite;
 }> {
-  const root = resolve(suitePath);
-  if (!insideBenchmarkRoot(root)) {
+  const lexicalRoot = resolve(suitePath);
+  if (!insideBenchmarkRoot(lexicalRoot)) {
     return failure(
       "INVALID_ARGUMENT",
       "Benchmark suite must be beneath .context-overflow"
     );
   }
-  const manifestPath = resolve(root, "benchmark-suite.json");
   try {
+    const suiteStats = lstatSync(lexicalRoot);
+    if (
+      suiteStats.isSymbolicLink() ||
+      !suiteStats.isDirectory()
+    ) {
+      return failure(
+        "INTEGRITY_ERROR",
+        "Benchmark suite root must be a real directory"
+      );
+    }
+    const canonicalBenchmarkRoot = realpathSync(benchmarkRoot());
+    const root = realpathSync(lexicalRoot);
+    const canonicalChild = relative(
+      canonicalBenchmarkRoot,
+      root
+    );
+    if (
+      canonicalChild.startsWith("..") ||
+      isAbsolute(canonicalChild)
+    ) {
+      return failure(
+        "INTEGRITY_ERROR",
+        "Benchmark suite resolves outside .context-overflow"
+      );
+    }
+    const manifestPath = resolve(root, "benchmark-suite.json");
     const stats = lstatSync(manifestPath);
     if (stats.isSymbolicLink() || !stats.isFile()) {
       return failure(
@@ -299,6 +397,13 @@ export function locateBenchmarkRun(
     `${runId}.json`
   );
   try {
+    const stats = lstatSync(indexPath);
+    if (stats.isSymbolicLink() || !stats.isFile()) {
+      return failure(
+        "INTEGRITY_ERROR",
+        "Benchmark index is not a regular file"
+      );
+    }
     const parsed = parseCanonical<{
       formatVersion: number;
       runId: string;

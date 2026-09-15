@@ -238,6 +238,37 @@ export function writeCanonicalAtomic(
   }
 }
 
+export function writeBytesAtomic(
+  root: string,
+  relativePath: string,
+  bytes: Buffer
+): Result<void> {
+  const resolved = resolveInside(root, relativePath);
+  if (!resolved.ok) return resolved;
+  const temporary = `${resolved.value}.tmp`;
+  try {
+    mkdirSync(dirname(resolved.value), { recursive: true });
+    const fd = openSync(temporary, "w");
+    try {
+      writeFileSync(fd, bytes);
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    renameSync(temporary, resolved.value);
+    return success(undefined);
+  } catch (error) {
+    return failure(
+      "IO_ERROR",
+      "Unable to atomically write benchmark file",
+      {
+        path: relativePath,
+        cause: error instanceof Error ? error.message : String(error)
+      }
+    );
+  }
+}
+
 export function readBoundBytes(
   root: string,
   identity: {
@@ -288,12 +319,35 @@ export function benchmarkPathFromRelative(
     );
   }
   const absolute = resolve(benchmarkRoot(), path);
-  return insideBenchmarkRoot(absolute)
-    ? success(absolute)
-    : failure(
+  if (!insideBenchmarkRoot(absolute)) {
+    return failure(
         "INTEGRITY_ERROR",
         "Benchmark index path escapes .context-overflow"
       );
+  }
+  try {
+    const stats = lstatSync(absolute);
+    if (stats.isSymbolicLink() || !stats.isDirectory()) {
+      return failure(
+        "INTEGRITY_ERROR",
+        "Benchmark indexed run is not a real directory"
+      );
+    }
+    const canonicalRoot = realpathSync(benchmarkRoot());
+    const canonical = realpathSync(absolute);
+    const child = relative(canonicalRoot, canonical);
+    return !child.startsWith("..") && !isAbsolute(child)
+      ? success(canonical)
+      : failure(
+          "INTEGRITY_ERROR",
+          "Benchmark indexed run resolves outside .context-overflow"
+        );
+  } catch {
+    return failure(
+      "HANDLE_NOT_FOUND",
+      "Benchmark indexed run is unavailable"
+    );
+  }
 }
 
 export function directoryIsEmpty(path: string): boolean {

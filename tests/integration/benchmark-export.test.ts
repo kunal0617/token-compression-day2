@@ -1,7 +1,11 @@
 import {
+  cpSync,
+  existsSync,
   mkdtempSync,
   readFileSync,
-  rmSync
+  rmSync,
+  symlinkSync,
+  writeFileSync
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -9,6 +13,7 @@ import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { exportBenchmarkSuite } from "../../src/benchmark/export.js";
+import { prepareOutputDirectory } from "../../src/benchmark/io.js";
 import { loadBenchmarkSuite } from "../../src/benchmark/storage.js";
 import { runCli } from "../../src/main.js";
 import { writeManualBenchmarkFixture } from "../helpers/manual-benchmark-fixture.js";
@@ -105,6 +110,136 @@ describe("benchmark export", () => {
       expect(stderr.join("")).toContain("Unsupported option");
     } finally {
       rmSync(externalRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects suite links, swapped payloads, and mutated stores", async () => {
+    const externalRoot = mkdtempSync(
+      join(tmpdir(), "ctxo-benchmark-binding-source-")
+    );
+    const suiteRoot = resolve(
+      ".context-overflow",
+      `benchmark-binding-suite-${Date.now()}`
+    );
+    const outside = mkdtempSync(
+      join(tmpdir(), "ctxo-benchmark-outside-suite-")
+    );
+    const link = resolve(
+      ".context-overflow",
+      `benchmark-suite-link-${Date.now()}`
+    );
+    const parentLink = resolve(
+      ".context-overflow",
+      `benchmark-suite-parent-link-${Date.now()}`
+    );
+    try {
+      writeManualBenchmarkFixture(externalRoot);
+      const exported = await exportBenchmarkSuite({
+        externalRoot,
+        output: suiteRoot,
+        cases: ["cq02", "cq04"]
+      });
+      expect(exported.ok).toBe(true);
+      if (!exported.ok) return;
+      expect(loadBenchmarkSuite(suiteRoot).ok).toBe(true);
+
+      cpSync(suiteRoot, outside, { recursive: true });
+      symlinkSync(outside, link, "junction");
+      expect(loadBenchmarkSuite(link).ok).toBe(false);
+      rmSync(link, { recursive: true, force: true });
+      symlinkSync(outside, parentLink, "junction");
+      expect(
+        loadBenchmarkSuite(parentLink).ok
+      ).toBe(false);
+      expect(
+        prepareOutputDirectory(
+          join(parentLink, "escaped-run"),
+          { allowExisting: false }
+        ).ok
+      ).toBe(false);
+      rmSync(parentLink, { recursive: true, force: true });
+
+      const originalA = join(
+        suiteRoot,
+        "cases",
+        "cq02",
+        "original.bin"
+      );
+      const originalB = join(
+        suiteRoot,
+        "cases",
+        "cq04",
+        "original.bin"
+      );
+      const first = readFileSync(originalA);
+      writeFileSync(originalA, readFileSync(originalB));
+      expect(loadBenchmarkSuite(suiteRoot).ok).toBe(false);
+      writeFileSync(originalA, first);
+
+      const storePath = join(
+        suiteRoot,
+        "cases",
+        "cq02",
+        "context.sqlite"
+      );
+      const storeBytes = readFileSync(storePath);
+      storeBytes[100] = (storeBytes[100] ?? 0) ^ 1;
+      writeFileSync(storePath, storeBytes);
+      expect(loadBenchmarkSuite(suiteRoot).ok).toBe(false);
+    } finally {
+      rmSync(externalRoot, { recursive: true, force: true });
+      rmSync(suiteRoot, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+      rmSync(link, { force: true });
+      rmSync(parentLink, { recursive: true, force: true });
+    }
+  });
+
+  it("returns typed root and UTF-8 failures without partial output", async () => {
+    const missingOutput = resolve(
+      ".context-overflow",
+      `benchmark-missing-root-${Date.now()}`
+    );
+    const missing = await exportBenchmarkSuite({
+      externalRoot: join(tmpdir(), "missing-benchmark-root"),
+      output: missingOutput
+    });
+    expect(missing.ok).toBe(false);
+    expect(existsSync(missingOutput)).toBe(false);
+
+    const externalRoot = mkdtempSync(
+      join(tmpdir(), "ctxo-benchmark-invalid-utf8-")
+    );
+    const invalidOutput = resolve(
+      ".context-overflow",
+      `benchmark-invalid-utf8-${Date.now()}`
+    );
+    try {
+      writeManualBenchmarkFixture(externalRoot);
+      writeFileSync(
+        join(
+          externalRoot,
+          "cq02-diagnostics",
+          "request.txt"
+        ),
+        Buffer.from([0xff, 0xfe, 0xfd])
+      );
+      const invalid = await exportBenchmarkSuite({
+        externalRoot,
+        output: invalidOutput,
+        cases: ["cq02"]
+      });
+      expect(invalid.ok).toBe(false);
+      if (!invalid.ok) {
+        expect(invalid.error.code).toBe("INVALID_UTF8");
+        expect(
+          JSON.stringify(invalid.error)
+        ).not.toContain(externalRoot);
+      }
+      expect(existsSync(invalidOutput)).toBe(false);
+    } finally {
+      rmSync(externalRoot, { recursive: true, force: true });
+      rmSync(invalidOutput, { recursive: true, force: true });
     }
   });
 });

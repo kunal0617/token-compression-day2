@@ -129,6 +129,7 @@ export interface BenchmarkReplayManifest {
   readonly liveOptIn: boolean;
   readonly selectedCases: readonly BenchmarkCaseId[];
   readonly modelBlocks: readonly BenchmarkModelBlock[];
+  readonly helperBlock?: BenchmarkModelBlock;
   readonly helperModelId?: string;
   readonly plans: readonly BenchmarkTrialPlan[];
   readonly estimatedCallCount: number;

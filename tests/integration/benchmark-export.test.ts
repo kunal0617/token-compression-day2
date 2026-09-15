@@ -19,6 +19,10 @@ import {
 } from "../../src/benchmark/io.js";
 import { loadBenchmarkSuite } from "../../src/benchmark/storage.js";
 import { runCli } from "../../src/main.js";
+import {
+  canonicalJson,
+  canonicalJsonDigest
+} from "../../src/core/canonical.js";
 import { writeManualBenchmarkFixture } from "../helpers/manual-benchmark-fixture.js";
 
 describe("benchmark export", () => {
@@ -188,6 +192,47 @@ describe("benchmark export", () => {
       const storeBytes = readFileSync(storePath);
       storeBytes[100] = (storeBytes[100] ?? 0) ^ 1;
       writeFileSync(storePath, storeBytes);
+      expect(loadBenchmarkSuite(suiteRoot).ok).toBe(false);
+      writeFileSync(storePath, readFileSync(join(
+        outside,
+        "cases",
+        "cq02",
+        "context.sqlite"
+      )));
+
+      const suitePath = join(
+        suiteRoot,
+        "benchmark-suite.json"
+      );
+      const parsed = JSON.parse(
+        readFileSync(suitePath, "utf8")
+      ) as {
+        cases: Array<Record<string, unknown>>;
+        digest: string;
+        [key: string]: unknown;
+      };
+      const firstCase = parsed.cases[0] as Record<
+        string,
+        unknown
+      >;
+      const secondCase = parsed.cases[1] as Record<
+        string,
+        unknown
+      >;
+      firstCase.storePath = (
+        secondCase.store as { path: string }
+      ).path;
+      const { digest: _caseDigest, ...caseUnsigned } =
+        firstCase;
+      firstCase.digest = canonicalJsonDigest(caseUnsigned);
+      const { digest: _suiteDigest, ...suiteUnsigned } =
+        parsed;
+      parsed.digest = canonicalJsonDigest(suiteUnsigned);
+      writeFileSync(
+        suitePath,
+        `${canonicalJson(parsed)}\n`,
+        "utf8"
+      );
       expect(loadBenchmarkSuite(suiteRoot).ok).toBe(false);
     } finally {
       rmSync(externalRoot, { recursive: true, force: true });

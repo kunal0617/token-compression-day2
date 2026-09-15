@@ -1,6 +1,16 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import {
+  existsSync,
+  readFileSync,
+  readdirSync,
+  statSync
+} from "node:fs";
+import {
+  dirname,
+  relative,
+  resolve,
+  sep
+} from "node:path";
 import { createRequire } from "node:module";
 
 import type {
@@ -84,6 +94,126 @@ function adapterMetadata(): ProducerMetadata {
 
 export const benchmarkSdkMetadata = adapterMetadata();
 const require = createRequire(import.meta.url);
+
+function implementationTreeDigest(input: {
+  readonly root: string;
+  readonly include: (path: string) => boolean;
+}) {
+  const files: string[] = [];
+  const visit = (directory: string): void => {
+    for (const name of readdirSync(directory)) {
+      const path = resolve(directory, name);
+      const stats = statSync(path);
+      if (stats.isDirectory()) visit(path);
+      else if (stats.isFile() && input.include(path)) {
+        files.push(path);
+      }
+
+    }
+  };
+  visit(input.root);
+  return canonicalJsonDigest(
+    files
+      .sort((left, right) =>
+        Buffer.compare(
+          Buffer.from(relative(input.root, left), "utf8"),
+          Buffer.from(relative(input.root, right), "utf8")
+        )
+      )
+      .map((path) => ({
+        path: relative(input.root, path).replaceAll("\\", "/"),
+        sha256: sha256Base64Url(readFileSync(path)),
+        byteLength: statSync(path).size
+      }))
+  );
+}
+
+function resolvePackageRootByName(
+  packageName: string
+): string | undefined {
+  return (require.resolve.paths(packageName) ?? [])
+    .map((base) =>
+      resolve(base, ...packageName.split("/"))
+    )
+    .find((candidate) =>
+      existsSync(resolve(candidate, "package.json"))
+    );
+}
+
+function packageTreeDigest(root: string): string {
+  return implementationTreeDigest({
+    root,
+    include: (path) =>
+      !path.includes(`${sep}node_modules${sep}`)
+  });
+}
+
+function productionDependencyClosureDigest(
+  rootPackageName: string,
+  rootPackagePath: string
+): string {
+  const visited = new Set<string>();
+  const packages: {
+    name: string;
+    treeDigest: string;
+  }[] = [];
+  const visit = (
+    packageName: string,
+    packageRoot: string
+  ): void => {
+    if (visited.has(packageName)) return;
+    visited.add(packageName);
+    const packageJson = JSON.parse(
+      readFileSync(
+        resolve(packageRoot, "package.json"),
+        "utf8"
+      )
+    ) as {
+      dependencies?: Readonly<Record<string, string>>;
+      optionalDependencies?: Readonly<Record<string, string>>;
+    };
+    packages.push({
+      name: packageName,
+      treeDigest: packageTreeDigest(packageRoot)
+    });
+    const dependencies = [
+      ...Object.keys(packageJson.dependencies ?? {}),
+      ...Object.keys(packageJson.optionalDependencies ?? {})
+    ].sort((left, right) =>
+      Buffer.compare(
+        Buffer.from(left, "utf8"),
+        Buffer.from(right, "utf8")
+      )
+    );
+    for (const dependency of dependencies) {
+      const dependencyRoot =
+        resolvePackageRootByName(dependency);
+      if (dependencyRoot !== undefined) {
+        visit(dependency, dependencyRoot);
+      }
+    }
+  };
+  visit(rootPackageName, rootPackagePath);
+  return canonicalJsonDigest(
+    packages.sort((left, right) =>
+      Buffer.compare(
+        Buffer.from(left.name, "utf8"),
+        Buffer.from(right.name, "utf8")
+      )
+    )
+  );
+}
+
+export function benchmarkSdkImplementationTreeDigest(
+  root: string
+): string {
+  return implementationTreeDigest({
+    root,
+    include: (path) =>
+      path.endsWith(".js") ||
+      path.endsWith("package.json")
+  });
+}
 
 export function benchmarkSdkRuntimeIdentity(): Result<{
   readonly executableDigest: string;
@@ -202,6 +332,17 @@ export function benchmarkSdkRuntimeIdentity(): Result<{
     const protocolBytes = readFileSync(protocolPath);
     const wrapperBytes = readFileSync(wrapperPath);
     const runtimeNodeBytes = readFileSync(runtimeNodePath);
+    const sdkImplementationDigest =
+      productionDependencyClosureDigest(
+        "@github/copilot-sdk",
+        packageRoot
+      );
+    const runtimePackageRoot =
+      explicitRuntime === undefined
+        ? dirname(dirname(dirname(runtimeNodePath)))
+        : dirname(wrapperPath);
+    const runtimeImplementationDigest =
+      packageTreeDigest(runtimePackageRoot);
     return success({
       executableDigest: canonicalJsonDigest({
         packageSha256: sha256Base64Url(packageBytes),
@@ -209,6 +350,12 @@ export function benchmarkSdkRuntimeIdentity(): Result<{
         esmEntrySha256: sha256Base64Url(esmEntryBytes),
         wrapperSha256: sha256Base64Url(wrapperBytes),
         runtimeNodeSha256: sha256Base64Url(runtimeNodeBytes),
+        sdkImplementationDigest,
+        runtimeImplementationDigest,
+        overridePathDigest:
+          explicitRuntime === undefined
+            ? null
+            : canonicalJsonDigest(resolve(explicitRuntime)),
         cliVersionSha256: sha256Base64Url(cliVersionBytes),
         overrideActive: explicitRuntime !== undefined,
         adapterDigest: benchmarkSdkMetadata.digest
@@ -291,6 +438,7 @@ function modelBlocks(models: readonly string[]): Result<readonly BenchmarkModelB
       "At least one valid model ID is required"
     );
   }
+
   return success(
     unique.map((modelId) => {
       return {
@@ -308,6 +456,32 @@ function modelBlocks(models: readonly string[]): Result<readonly BenchmarkModelB
       };
     })
   );
+}
+
+function helperBlock(
+  modelId: string | undefined
+): Result<BenchmarkModelBlock | undefined> {
+  if (modelId === undefined) return success(undefined);
+  const runtime = benchmarkSdkRuntimeIdentity();
+  if (!runtime.ok) return runtime;
+  const helperPermissions = {
+    ...permissions,
+    sourceRead: false,
+    evidenceRead: false
+  };
+  return success({
+    modelId,
+    contextTier: "default",
+    reasoningEffort: null,
+    settingsDigest: benchmarkApplicationSettingsDigest(
+      modelId,
+      helperPermissions
+    ),
+    permissionDigest: canonicalJsonDigest(helperPermissions),
+    adapterId: benchmarkSdkMetadata.producerId,
+    executableDigest: runtime.value.executableDigest,
+    protocolDigest: runtime.value.protocolDigest
+  });
 }
 
 export function benchmarkApplicationSettingsDigest(
@@ -334,6 +508,7 @@ function createPlans(input: {
   readonly suiteCases: readonly BenchmarkExportCase[];
   readonly selectedCases: readonly BenchmarkCaseId[];
   readonly models: readonly BenchmarkModelBlock[];
+  readonly helperBlock?: BenchmarkModelBlock;
   readonly helperModelId?: string;
   readonly trials: number;
   readonly seed: number;
@@ -345,13 +520,15 @@ function createPlans(input: {
   for (const [caseOrdinal, item] of selectedSuiteCases.entries()) {
     if (item.kind === "helper") {
       for (let trial = 1; trial <= input.trials; trial += 1) {
-        const modelId = input.helperModelId ?? "not-configured";
+        const modelId =
+          input.helperBlock?.modelId ?? "not-configured";
         const helperPermissions = {
           ...permissions,
           sourceRead: false,
           evidenceRead: false
         };
         const settingsDigest =
+          input.helperBlock?.settingsDigest ??
           benchmarkApplicationSettingsDigest(
             modelId,
             helperPermissions
@@ -373,6 +550,7 @@ function createPlans(input: {
             helper: true,
             settingsDigest,
             permissionDigest:
+              input.helperBlock?.permissionDigest ??
               canonicalJsonDigest(helperPermissions),
             pairDigest: canonicalJsonDigest({
               caseId: item.caseId,
@@ -449,6 +627,7 @@ function createManifest(input: {
   readonly selectedCases: readonly BenchmarkCaseId[];
   readonly suiteCases: readonly BenchmarkExportCase[];
   readonly models: readonly BenchmarkModelBlock[];
+  readonly helperBlock?: BenchmarkModelBlock;
   readonly helperModelId?: string;
   readonly trials: number;
   readonly modelTimeoutMs: number;
@@ -461,6 +640,9 @@ function createManifest(input: {
     suiteCases: input.suiteCases,
     selectedCases: input.selectedCases,
     models: input.models,
+    ...(input.helperBlock === undefined
+      ? {}
+      : { helperBlock: input.helperBlock }),
     ...(input.helperModelId === undefined
       ? {}
       : { helperModelId: input.helperModelId }),
@@ -481,6 +663,9 @@ function createManifest(input: {
     liveOptIn: true,
     selectedCases: input.selectedCases,
     modelBlocks: input.models,
+    ...(input.helperBlock === undefined
+      ? {}
+      : { helperBlock: input.helperBlock }),
     ...(input.helperModelId === undefined
       ? {}
       : { helperModelId: input.helperModelId }),
@@ -598,10 +783,19 @@ export interface BenchmarkAgentAdapter {
 }
 
 export type BenchmarkAgentFactory = (
-  authority: AgentRunScopeAuthority
+  authority: AgentRunScopeAuthority,
+  hooks?: {
+    readonly onTimeout?: (details: {
+      readonly runId: string;
+      readonly sessionId: string;
+    }) => Promise<void> | void;
+  }
 ) => BenchmarkAgentAdapter;
 
-const defaultAgentFactory: BenchmarkAgentFactory = (authority) =>
+const defaultAgentFactory: BenchmarkAgentFactory = (
+  authority,
+  hooks
+) =>
   (() => {
     const identity = benchmarkSdkRuntimeIdentity();
     if (!identity.ok) {
@@ -609,7 +803,12 @@ const defaultAgentFactory: BenchmarkAgentFactory = (authority) =>
     }
     const adapter = new OptionalCopilotSdkAdapter(
       undefined,
-      authority
+      authority,
+      {
+        ...(hooks?.onTimeout === undefined
+          ? {}
+          : { onTimeout: hooks.onTimeout })
+      }
     );
     return {
       metadata: adapter.metadata,
@@ -686,11 +885,8 @@ function responseFacts(
   contract: BenchmarkCaseContract,
   response: string
 ) {
-  const lower = response.toLowerCase();
   const visible = contract.requiredFacts
-    .filter((item) =>
-      lower.includes(item.value.toLowerCase())
-    )
+    .filter((item) => factPresent(response, item))
     .map((item) => item.factId);
   return {
     visible,
@@ -711,6 +907,66 @@ function responseFacts(
   };
 }
 
+function escaped(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function literalPresent(text: string, value: string): boolean {
+  const normalized = value.trim();
+  if (normalized.length === 0) return false;
+  if (/^[A-Za-z0-9_.-]+$/.test(normalized)) {
+    return new RegExp(
+      `(?<![A-Za-z0-9_.-])${escaped(
+        normalized
+      )}(?![A-Za-z0-9_.-])`,
+      "i"
+    ).test(text);
+  }
+  return text.toLowerCase().includes(normalized.toLowerCase());
+}
+
+function rolePresent(
+  text: string,
+  role: "expected" | "actual",
+  value: string
+): boolean {
+  const assignments: {
+    role: "expected" | "actual";
+    clause: string;
+  }[] = [];
+  const pattern =
+    /\b(expected|actual|received)\b\s*(?::|=|\bis\b)?\s*([\s\S]*?)(?=\b(?:expected|actual|received)\b|[\r\n]|$)/gi;
+  for (const match of text.matchAll(pattern)) {
+    const label = match[1]?.toLowerCase();
+    const clause = match[2]
+      ?.replace(/\b(?:but|and|while)\s*$/i, "")
+      .trim();
+    if (label === undefined || clause === undefined) continue;
+    assignments.push({
+      role: label === "expected" ? "expected" : "actual",
+      clause
+    });
+  }
+  return assignments.some(
+    (assignment) =>
+      assignment.role === role &&
+      literalPresent(assignment.clause, value)
+  );
+}
+
+function factPresent(
+  text: string,
+  fact: BenchmarkCaseContract["requiredFacts"][number]
+): boolean {
+  if (fact.kind === "expected") {
+    return rolePresent(text, "expected", fact.value);
+  }
+  if (fact.kind === "actual") {
+    return rolePresent(text, "actual", fact.value);
+  }
+  return literalPresent(text, fact.value);
+}
+
 function unsupportedNumberClaims(
   response: string,
   payload: Buffer
@@ -727,9 +983,7 @@ function recoverableFacts(
 ): string[] {
   const text = payload.toString("utf8").toLowerCase();
   return contract.requiredFacts
-    .filter((fact) =>
-      text.includes(fact.value.toLowerCase())
-    )
+    .filter((fact) => factPresent(text, fact))
     .map((fact) => fact.factId);
 }
 
@@ -738,7 +992,7 @@ function contradictionCount(
   response: string
 ): number {
   const text = response.toLowerCase();
-  return contract.requiredFacts.filter((fact) => {
+  const explicit = contract.requiredFacts.filter((fact) => {
     const value = fact.value.toLowerCase();
     return (
       text.includes(`not ${value}`) ||
@@ -746,6 +1000,40 @@ function contradictionCount(
       text.includes(`contradicts ${value}`)
     );
   }).length;
+  const expected = contract.requiredFacts.filter(
+    (fact) => fact.kind === "expected"
+  );
+  const actual = contract.requiredFacts.filter(
+    (fact) => fact.kind === "actual"
+  );
+  const inversions = expected.filter((expectedFact) => {
+    const key = expectedFact.label.replace(/^expected:/, "");
+    const actualFact = actual.find(
+      (candidate) =>
+        candidate.label.replace(/^actual:/, "") === key
+    );
+    return (
+      actualFact !== undefined &&
+      rolePresent(response, "actual", expectedFact.value) &&
+      rolePresent(response, "expected", actualFact.value)
+    );
+  }).length;
+  return explicit + inversions;
+}
+
+export function assessBenchmarkResponse(
+  contract: BenchmarkCaseContract,
+  response: string,
+  payload: Buffer
+) {
+  const found = responseFacts(contract, response);
+  return {
+    visibleFactIds: found.visible,
+    recoverableFactIds: recoverableFacts(contract, payload),
+    distinctFailureIds: found.failures,
+    citations: found.citations,
+    contradictions: contradictionCount(contract, response)
+  };
 }
 
 function deterministicAbstention(
@@ -896,6 +1184,8 @@ export async function runBenchmarkLive(input: {
   if (!selected.ok) return selected;
   const blocks = modelBlocks(input.models);
   if (!blocks.ok) return blocks;
+  const helper = helperBlock(input.helperModelId);
+  if (!helper.ok) return helper;
   const loadedState = loadRunState(output.value);
   if (!loadedState.ok) return loadedState;
   let current: BenchmarkRunState;
@@ -913,6 +1203,9 @@ export async function runBenchmarkLive(input: {
       selectedCases: selected.value,
       suiteCases: suite.value.suite.cases,
       models: blocks.value,
+      ...(helper.value === undefined
+        ? {}
+        : { helperBlock: helper.value }),
       ...(input.helperModelId === undefined
         ? {}
         : { helperModelId: input.helperModelId }),
@@ -951,6 +1244,8 @@ export async function runBenchmarkLive(input: {
     current.manifest.cleanupTimeoutMs !== cleanupTimeoutMs ||
     canonicalJson(current.manifest.modelBlocks) !==
       canonicalJson(blocks.value) ||
+    canonicalJson(current.manifest.helperBlock ?? null) !==
+      canonicalJson(helper.value ?? null) ||
     current.manifest.helperModelId !== input.helperModelId
   ) {
     return failure(
@@ -1228,25 +1523,53 @@ export async function runBenchmarkLive(input: {
     });
     if (!runningState.ok) return runningState;
     saved = runningState;
-    const adapter = factory(authority);
-    const runtimeIdentity = benchmarkSdkRuntimeIdentity();
-    if (!runtimeIdentity.ok) {
-      await closeAgent(
-        adapter,
-        current.manifest.cleanupTimeoutMs
-      );
-      return runtimeIdentity;
-    }
+    let timeoutPersisted = false;
+    let timeoutPersistenceFailure:
+      | Result<BenchmarkRunState>
+      | undefined;
+    const adapter = factory(authority, {
+      onTimeout: async () => {
+        timeoutPersisted = true;
+        mutableTrials[plan.trialId] = terminalRecord(plan, {
+          status: "timeout",
+          startedAt:
+            running.startedAt ?? new Date().toISOString(),
+          completedAt: new Date().toISOString(),
+          sent: true,
+          abstained: false,
+          securityAssessmentDigest: assessment.digest,
+          errorCode: "IO_ERROR",
+          errorDigest: canonicalJsonDigest({
+            reason: "timeout-before-cleanup"
+          })
+        });
+        if (!saved.ok) {
+          timeoutPersistenceFailure = saved;
+          return;
+        }
+        const persisted = saveRunState(output.value, {
+          ...stateWithoutDigest(saved.value),
+          trials: { ...mutableTrials },
+          status: "running",
+          updatedAt: new Date().toISOString()
+        });
+        if (persisted.ok) {
+          saved = persisted;
+        } else {
+          timeoutPersistenceFailure = persisted;
+        }
+      }
+    });
     const modelBlock = current.manifest.modelBlocks.find(
       (block) => block.modelId === plan.modelId
     );
     const expectedExecutableDigest =
       plan.helper
-        ? runtimeIdentity.value.executableDigest
+        ? current.manifest.helperBlock?.executableDigest
         : modelBlock?.executableDigest;
     const expectedProtocolDigest =
       plan.helper
-        ? runtimeIdentity.value.protocolDigest
+        ? current.manifest.helperBlock?.protocolDigest
         : modelBlock?.protocolDigest;
     if (
       adapter.executableDigest !==
@@ -1343,8 +1666,19 @@ export async function runBenchmarkLive(input: {
       0,
       performance.now() - modelStartedAt
     );
+    if (
+      timeoutPersistenceFailure !== undefined &&
+      !timeoutPersistenceFailure.ok
+    ) {
+      await closeAgent(
+        adapter,
+        current.manifest.cleanupTimeoutMs
+      );
+      return timeoutPersistenceFailure;
+    }
     if (!sent.ok) {
       const timeout =
+        timeoutPersisted ||
         sent.error.details?.reason === "timeout";
       mutableTrials[plan.trialId] = terminalRecord(plan, {
         status: timeout ? "timeout" : "failed",
@@ -1412,6 +1746,11 @@ export async function runBenchmarkLive(input: {
           identity.sha256 ||
         sent.value.applicationSettingsDigest !==
           plan.settingsDigest ||
+        sent.value.providerUsage === undefined ||
+        sent.value.providerUsage.modelIds.length === 0 ||
+        sent.value.providerUsage.modelIds.some(
+          (modelId) => modelId !== plan.modelId
+        ) ||
         canonicalJsonDigest(sent.value.permissions) !==
           plan.permissionDigest ||
         canonicalJsonDigest(sent.value.producer) !==
@@ -1483,7 +1822,11 @@ export async function runBenchmarkLive(input: {
           responseBytes
         );
         if (!stored.ok) return stored;
-        const found = responseFacts(contract.value, response);
+        const assessedResponse = assessBenchmarkResponse(
+          contract.value,
+          response,
+          payload.value
+        );
         const abstained =
           /\b(?:insufficient|missing|cannot determine|can't determine|need more evidence|abstain)\b/i.test(
             response
@@ -1494,7 +1837,8 @@ export async function runBenchmarkLive(input: {
         const visibleRecall =
           required.length === 0
             ? 1
-            : found.visible.length / required.length;
+            : assessedResponse.visibleFactIds.length /
+              required.length;
         const tokens = measureTokens(
           payload.value.toString("utf8"),
           response
@@ -1543,21 +1887,19 @@ export async function runBenchmarkLive(input: {
             taskSuccess:
               !abstained &&
               (required.length === 0 || visibleRecall >= 0.5),
-            visibleFactIds: found.visible,
-            recoverableFactIds: recoverableFacts(
-              contract.value,
-              payload.value
-            ),
-            distinctFailureIds: found.failures,
-            citations: found.citations,
+            visibleFactIds:
+              assessedResponse.visibleFactIds,
+            recoverableFactIds:
+              assessedResponse.recoverableFactIds,
+            distinctFailureIds:
+              assessedResponse.distinctFailureIds,
+            citations: assessedResponse.citations,
             unsupportedClaims: unsupportedNumberClaims(
               response,
               payload.value
             ),
-            contradictions: contradictionCount(
-              contract.value,
-              response
-            ),
+            contradictions:
+              assessedResponse.contradictions,
             abstained,
             retrievalTokens: null,
             retrievalCalls: sent.value.events.filter((event) =>

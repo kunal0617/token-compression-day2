@@ -1,4 +1,5 @@
 import {
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -16,6 +17,7 @@ import type {
   ApprovedAgentSendRequest
 } from "../../src/contracts/agent.js";
 import type { ProducerMetadata } from "../../src/contracts/providers.js";
+import type { BenchmarkCaseContract } from "../../src/benchmark/contracts.js";
 import type { Result } from "../../src/core/result.js";
 import { success } from "../../src/core/result.js";
 import { canonicalJsonDigest } from "../../src/core/canonical.js";
@@ -23,6 +25,8 @@ import { sha256Base64Url } from "../../src/core/hash.js";
 import { exportBenchmarkSuite } from "../../src/benchmark/export.js";
 import {
   benchmarkApplicationSettingsDigest,
+  assessBenchmarkResponse,
+  benchmarkSdkImplementationTreeDigest,
   benchmarkSdkMetadata,
   benchmarkSdkRuntimeIdentity,
   type BenchmarkAgentAdapter,
@@ -32,6 +36,10 @@ import {
   benchmarkPathFromRelative,
   relativeToBenchmarkRoot
 } from "../../src/benchmark/io.js";
+import {
+  loadBenchmarkSuite,
+  loadCaseContract
+} from "../../src/benchmark/storage.js";
 import {
   buildBenchmarkReport,
   writeBenchmarkReport
@@ -51,16 +59,15 @@ const runtimeIdentity = requiredRuntimeIdentity();
 
 class FakeBenchmarkAgent implements BenchmarkAgentAdapter {
   readonly metadata = producer;
-  readonly executableDigest =
-    runtimeIdentity.executableDigest;
-  readonly protocolDigest =
-    runtimeIdentity.protocolDigest;
+  readonly executableDigest: string;
+  readonly protocolDigest: string;
   readonly #authority: AgentRunScopeAuthority;
   readonly requests: ApprovedAgentSendRequest[];
   readonly #overrideModelId: string | undefined;
   readonly #fixedSessionId: string | undefined;
   readonly #sendPending: boolean;
   readonly #closePending: boolean;
+  readonly #responseText: string | undefined;
 
   constructor(
     authority: AgentRunScopeAuthority,
@@ -70,6 +77,9 @@ class FakeBenchmarkAgent implements BenchmarkAgentAdapter {
       readonly fixedSessionId?: string;
       readonly sendPending?: boolean;
       readonly closePending?: boolean;
+      readonly responseText?: string;
+      readonly executableDigest?: string;
+      readonly protocolDigest?: string;
     } = {}
   ) {
     this.#authority = authority;
@@ -78,6 +88,13 @@ class FakeBenchmarkAgent implements BenchmarkAgentAdapter {
     this.#fixedSessionId = options.fixedSessionId;
     this.#sendPending = options.sendPending === true;
     this.#closePending = options.closePending === true;
+    this.#responseText = options.responseText;
+    this.executableDigest =
+      options.executableDigest ??
+      runtimeIdentity.executableDigest;
+    this.protocolDigest =
+      options.protocolDigest ??
+      runtimeIdentity.protocolDigest;
   }
 
   async send(
@@ -89,7 +106,9 @@ class FakeBenchmarkAgent implements BenchmarkAgentAdapter {
       return new Promise(() => undefined);
     }
     this.requests.push(request);
-    const responseText = request.approved.bytes.toString("utf8");
+    const responseText =
+      this.#responseText ??
+      request.approved.bytes.toString("utf8");
     return success({
       runId: request.runId,
       sessionId:
@@ -117,6 +136,14 @@ class FakeBenchmarkAgent implements BenchmarkAgentAdapter {
           timestamp: "2030-01-01T00:00:00.000Z"
         }
       ],
+      providerUsage: {
+        inputTokens: 100,
+        outputTokens: 25,
+        modelIds: [
+          this.#overrideModelId ??
+            (request.approved.subject.target.modelId as string)
+        ]
+      },
       responseText,
       timedOut: false,
       aborted: false,
@@ -241,7 +268,7 @@ describe("benchmark live and reporting", () => {
         );
       }
     }
-  });
+  }, 30_000);
 
   it("plans, approves, resumes, and reports per model without duplicate sends", async () => {
     const externalRoot = mkdtempSync(
@@ -389,10 +416,19 @@ describe("benchmark live and reporting", () => {
       );
       expect(
         report.value.report.models.every((model) =>
-          model.scores.every(
+          model.scores
+            .filter((value) => value.inputTokens !== null)
+            .every(
             (value) =>
-              value.inputTokens === null &&
-              value.outputTokens === null
+              value.inputTokens === 100 &&
+              value.outputTokens === 25
+            )
+        )
+      ).toBe(true);
+      expect(
+        report.value.report.models.some((model) =>
+          model.scores.some(
+            (value) => value.inputTokens === null
           )
         )
       ).toBe(true);
@@ -749,6 +785,9 @@ describe("benchmark live and reporting", () => {
     );
     const wrapper = join(runtimeRoot, "copilot-runtime.exe");
     const runtimeNode = join(runtimeRoot, "runtime.node");
+    const secondRoot = mkdtempSync(
+      join(tmpdir(), "ctxo-sdk-runtime-copy-")
+    );
     const original = process.env.COPILOT_CLI_PATH;
     try {
       writeFileSync(wrapper, "wrapper-one", "utf8");
@@ -763,6 +802,27 @@ describe("benchmark live and reporting", () => {
       expect(first.value.executableDigest).not.toBe(
         second.value.executableDigest
       );
+      writeFileSync(
+        join(secondRoot, "copilot-runtime.exe"),
+        "wrapper-two",
+        "utf8"
+      );
+      writeFileSync(
+        join(secondRoot, "runtime.node"),
+        "runtime-one",
+        "utf8"
+      );
+      process.env.COPILOT_CLI_PATH = join(
+        secondRoot,
+        "copilot-runtime.exe"
+      );
+      const moved = benchmarkSdkRuntimeIdentity();
+      expect(moved.ok).toBe(true);
+      if (moved.ok) {
+        expect(moved.value.executableDigest).not.toBe(
+          second.value.executableDigest
+        );
+      }
     } finally {
       if (original === undefined) {
         delete process.env.COPILOT_CLI_PATH;
@@ -770,6 +830,36 @@ describe("benchmark live and reporting", () => {
         process.env.COPILOT_CLI_PATH = original;
       }
       rmSync(runtimeRoot, { recursive: true, force: true });
+      rmSync(secondRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("binds both ESM and CJS SDK implementation trees", () => {
+    const root = mkdtempSync(
+      join(tmpdir(), "ctxo-sdk-tree-")
+    );
+    try {
+      mkdirSync(join(root, "cjs"), { recursive: true });
+      writeFileSync(join(root, "index.js"), "export {};\n");
+      writeFileSync(
+        join(root, "cjs", "client.js"),
+        "module.exports = {};\n"
+      );
+      writeFileSync(
+        join(root, "cjs", "package.json"),
+        '{"type":"commonjs"}'
+      );
+      const first =
+        benchmarkSdkImplementationTreeDigest(root);
+      writeFileSync(
+        join(root, "cjs", "client.js"),
+        "module.exports = { changed: true };\n"
+      );
+      const second =
+        benchmarkSdkImplementationTreeDigest(root);
+      expect(first).not.toBe(second);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 
@@ -793,6 +883,7 @@ describe("benchmark live and reporting", () => {
         output: suiteRoot,
         cases: ["cq02"]
       });
+
       expect(exported.ok).toBe(true);
       if (!exported.ok) return;
       const planned = await runBenchmarkLive({
@@ -839,6 +930,229 @@ describe("benchmark live and reporting", () => {
               record.status === "timeout" &&
               record.errorCode === "IO_ERROR"
           )
+      ).toBe(true);
+    } finally {
+      rmSync(externalRoot, { recursive: true, force: true });
+      rmSync(suiteRoot, { recursive: true, force: true });
+      rmSync(runRoot, { recursive: true, force: true });
+      if (runId !== undefined) {
+        rmSync(
+          resolve(
+            ".context-overflow",
+            "benchmark-index",
+            `${runId}.json`
+          ),
+          { force: true }
+        );
+      }
+    }
+  });
+
+  it("binds configured helper execution to its approved runtime", async () => {
+    const externalRoot = mkdtempSync(
+      join(tmpdir(), "ctxo-benchmark-helper-source-")
+    );
+    const suiteRoot = resolve(
+      ".context-overflow",
+      `benchmark-helper-suite-${Date.now()}`
+    );
+    const runRoot = resolve(
+      ".context-overflow",
+      `benchmark-helper-run-${Date.now()}`
+    );
+    let runId: string | undefined;
+    try {
+      writeManualBenchmarkFixture(externalRoot);
+      const exported = await exportBenchmarkSuite({
+        externalRoot,
+        output: suiteRoot,
+        cases: ["luna"]
+      });
+      expect(exported.ok).toBe(true);
+      if (!exported.ok) return;
+      const planned = await runBenchmarkLive({
+        suitePath: suiteRoot,
+        output: runRoot,
+        models: ["gpt-5.4-mini"],
+        helperModelId: "gpt-5.6-luna",
+        trials: 1,
+        cases: ["luna"],
+        dryRun: true,
+        liveFlag: true,
+        environmentLiveOptIn: true
+      });
+      expect(planned.ok).toBe(true);
+      if (!planned.ok) return;
+      runId = planned.value.state.benchmarkRunId;
+      expect(
+        planned.value.state.manifest.helperBlock?.modelId
+      ).toBe("gpt-5.6-luna");
+      const executed = await runBenchmarkLive({
+        suitePath: suiteRoot,
+        output: runRoot,
+        models: ["gpt-5.4-mini"],
+        helperModelId: "gpt-5.6-luna",
+        trials: 1,
+        cases: ["luna"],
+        dryRun: false,
+        liveFlag: true,
+        environmentLiveOptIn: true,
+        approvedManifestDigest:
+          planned.value.state.manifest.digest,
+        agentFactory: (authority) =>
+          new FakeBenchmarkAgent(authority, [], {
+            executableDigest: canonicalJsonDigest(
+              "changed-helper-runtime"
+            )
+          })
+      });
+      expect(executed.ok).toBe(false);
+    } finally {
+      rmSync(externalRoot, { recursive: true, force: true });
+      rmSync(suiteRoot, { recursive: true, force: true });
+      rmSync(runRoot, { recursive: true, force: true });
+      if (runId !== undefined) {
+        rmSync(
+          resolve(
+            ".context-overflow",
+            "benchmark-index",
+            `${runId}.json`
+          ),
+          { force: true }
+        );
+      }
+    }
+  });
+
+  it("uses role-scoped exact matching for overlapping expected and actual values", () => {
+    const unsigned = {
+      caseId: "cq02" as const,
+      contract: "CQ-02",
+      kind: "paired" as const,
+      prompt: "diagnose",
+      requiredFacts: [
+        {
+          factId: "expected-safe",
+          label: "expected:case",
+          value: "safe",
+          valueSha256: sha256Base64Url(
+            Buffer.from("safe")
+          ),
+          kind: "expected" as const,
+          required: true
+        },
+        {
+          factId: "actual-unsafe",
+          label: "actual:case",
+          value: "unsafe",
+          valueSha256: sha256Base64Url(
+            Buffer.from("unsafe")
+          ),
+          kind: "actual" as const,
+          required: true
+        }
+      ],
+      allowAbstention: false
+    };
+    const contract: BenchmarkCaseContract = {
+      ...unsigned,
+      digest: canonicalJsonDigest(unsigned)
+    };
+    const payload = Buffer.from(
+      "Expected: safe\nReceived: unsafe\n"
+    );
+    const correct = assessBenchmarkResponse(
+      contract,
+      "Expected: safe but Received: unsafe",
+      payload
+    );
+    expect(correct.contradictions).toBe(0);
+    expect(correct.visibleFactIds).toEqual([
+      "expected-safe",
+      "actual-unsafe"
+    ]);
+    const inverted = assessBenchmarkResponse(
+      contract,
+      "Expected: unsafe\nReceived: safe\n",
+      payload
+    );
+    expect(inverted.contradictions).toBe(1);
+    expect(inverted.visibleFactIds).toEqual([]);
+  });
+
+  it("detects expected/actual inversion without overlapping-value false matches", async () => {
+    const externalRoot = mkdtempSync(
+      join(tmpdir(), "ctxo-benchmark-contradiction-source-")
+    );
+    const suiteRoot = resolve(
+      ".context-overflow",
+      `benchmark-contradiction-suite-${Date.now()}`
+    );
+    const runRoot = resolve(
+      ".context-overflow",
+      `benchmark-contradiction-run-${Date.now()}`
+    );
+    let runId: string | undefined;
+    try {
+      writeManualBenchmarkFixture(externalRoot, {
+        "cq02-diagnostics/request.txt": [
+          "FAIL tests/a.test.ts > suite > case",
+          "Expected: safe",
+          "Received: unsafe",
+          "Process exited with code 1",
+          ""
+        ].join("\n")
+      });
+      const exported = await exportBenchmarkSuite({
+        externalRoot,
+        output: suiteRoot,
+        cases: ["cq02"]
+      });
+      expect(exported.ok).toBe(true);
+      if (!exported.ok) return;
+      const planned = await runBenchmarkLive({
+        suitePath: suiteRoot,
+        output: runRoot,
+        models: ["gpt-5.4-mini"],
+        trials: 1,
+        cases: ["cq02"],
+        dryRun: true,
+        liveFlag: true,
+        environmentLiveOptIn: true
+      });
+      expect(planned.ok).toBe(true);
+      if (!planned.ok) return;
+      runId = planned.value.state.benchmarkRunId;
+      const executed = await runBenchmarkLive({
+        suitePath: suiteRoot,
+        output: runRoot,
+        models: ["gpt-5.4-mini"],
+        trials: 1,
+        cases: ["cq02"],
+        dryRun: false,
+        liveFlag: true,
+        environmentLiveOptIn: true,
+        approvedManifestDigest:
+          planned.value.state.manifest.digest,
+        agentFactory: (authority) =>
+          new FakeBenchmarkAgent(authority, [], {
+            responseText:
+              "Expected: unsafe\nReceived: safe\n"
+          })
+      });
+      expect(executed.ok).toBe(true);
+      const report = buildBenchmarkReport(runId);
+      expect(report.ok).toBe(true);
+      if (!report.ok) return;
+      expect(
+        report.value.report.models[0]?.scores.every(
+          (value) => value.contradictions > 0
+        )
+      ).toBe(true);
+      expect(
+        report.value.report.models[0]?.scores.every(
+          (value) => value.visibleEvidenceRecall < 1
+        )
       ).toBe(true);
     } finally {
       rmSync(externalRoot, { recursive: true, force: true });

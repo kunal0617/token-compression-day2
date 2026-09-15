@@ -89,6 +89,15 @@ function validateCase(
       "Benchmark export case metadata is invalid"
     );
   }
+  if (
+    item.store.path.replaceAll("\\", "/") !==
+    item.storePath.replaceAll("\\", "/")
+  ) {
+    return failure(
+      "INTEGRITY_ERROR",
+      "Benchmark store identity path does not match storePath"
+    );
+  }
   for (const identity of [
     item.store,
     item.original,

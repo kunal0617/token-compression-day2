@@ -484,6 +484,12 @@ export class OptionalCopilotSdkAdapter {
   readonly #loader: CopilotSdkLoader;
   readonly #authority: AgentRunScopeAuthority | undefined;
   readonly #cleanupTimeoutMs: number;
+  readonly #onTimeout:
+    | ((details: {
+        readonly runId: string;
+        readonly sessionId: string;
+      }) => Promise<void> | void)
+    | undefined;
   #client: SdkClientLike | undefined;
   #clientWorkingDirectory: string | undefined;
   #operationTail: Promise<void> = Promise.resolve();
@@ -496,18 +502,28 @@ export class OptionalCopilotSdkAdapter {
       readonly runId: string;
       readonly modelId: string;
       readonly workingDirectory: string;
+      readonly eventSink: {
+        current: ((event: SdkEvent) => void) | undefined;
+      };
     }
   >();
 
   constructor(
     loader: CopilotSdkLoader = defaultLoader,
     authority?: AgentRunScopeAuthority,
-    options: { readonly cleanupTimeoutMs?: number } = {}
+    options: {
+      readonly cleanupTimeoutMs?: number;
+      readonly onTimeout?: (details: {
+        readonly runId: string;
+        readonly sessionId: string;
+      }) => Promise<void> | void;
+    } = {}
   ) {
     this.#loader = loader;
     this.#authority = authority;
     this.#cleanupTimeoutMs =
       options.cleanupTimeoutMs ?? 5_000;
+    this.#onTimeout = options.onTimeout;
   }
 
   async #exclusive<T>(operation: () => Promise<T>): Promise<T> {
@@ -723,6 +739,13 @@ export class OptionalCopilotSdkAdapter {
         permissions: approved.subject.target.permissions,
         availableTools: toolNames
       });
+      const collectEvent = (event: SdkEvent): void => {
+        rawEvents.push(event);
+        events.push(eventRecord(event));
+      };
+      const eventSink: {
+        current: ((event: SdkEvent) => void) | undefined;
+      } = { current: collectEvent };
       const baseConfig = {
         clientName: "context-overflow",
         workingDirectory: approved.subject.target.workingDirectory,
@@ -733,10 +756,8 @@ export class OptionalCopilotSdkAdapter {
         },
         tools,
         availableTools: toolNames,
-        onEvent: (event: SdkEvent) => {
-          rawEvents.push(event);
-          events.push(eventRecord(event));
-        },
+        onEvent: (event: SdkEvent) =>
+          eventSink.current?.(event),
         onPermissionRequest: permissionHandler(
           approved.subject.target.permissions
         ),
@@ -780,6 +801,7 @@ export class OptionalCopilotSdkAdapter {
         );
       }
       let session = cached?.session;
+      let activeEventSink = eventSink;
       if (cached !== undefined && cached.bindingDigest !== bindingDigest) {
         await cached.session.disconnect();
         session = await client.resumeSession(targetSessionId as string, baseConfig);
@@ -788,7 +810,8 @@ export class OptionalCopilotSdkAdapter {
           bindingDigest,
           runId: request.runId,
           modelId: cached.modelId,
-          workingDirectory: approved.subject.target.workingDirectory
+          workingDirectory: approved.subject.target.workingDirectory,
+          eventSink
         });
       } else if (session === undefined) {
         session =
@@ -803,18 +826,16 @@ export class OptionalCopilotSdkAdapter {
           bindingDigest,
           runId: request.runId,
           modelId: approved.subject.target.modelId,
-          workingDirectory: approved.subject.target.workingDirectory
+          workingDirectory: approved.subject.target.workingDirectory,
+          eventSink
         });
+      } else if (cached !== undefined) {
+        activeEventSink = cached.eventSink;
+        activeEventSink.current = collectEvent;
       }
       let timedOut = false;
       let aborted = false;
       let timer: NodeJS.Timeout | undefined;
-      const unsubscribe = session.on((event) =>
-        {
-          rawEvents.push(event);
-          events.push(eventRecord(event));
-        }
-      );
       try {
         const timeout = new Promise<never>((_, reject) => {
           timer = setTimeout(() => {
@@ -848,6 +869,10 @@ export class OptionalCopilotSdkAdapter {
         });
       } catch (error) {
         if (timedOut) {
+          await this.#onTimeout?.({
+            runId: request.runId,
+            sessionId: session.sessionId
+          });
           const abortCompleted = await boundedCleanup(
             session.abort(),
             this.#cleanupTimeoutMs
@@ -867,7 +892,7 @@ export class OptionalCopilotSdkAdapter {
         });
       } finally {
         if (timer !== undefined) clearTimeout(timer);
-        unsubscribe();
+        activeEventSink.current = undefined;
       }
     } catch (error) {
       return failure("IO_ERROR", "Unable to initialize Copilot SDK adapter", {

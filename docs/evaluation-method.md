@@ -65,5 +65,8 @@ per-model JSON/Markdown/CSV reports.
 
 Benchmark runtime identity includes the actual installed SDK entries, effective
 runtime wrapper and native module (including `COPILOT_CLI_PATH` overrides), and
-protocol implementation. Provider token usage is reported only when emitted by
-the SDK; otherwise it remains explicitly unavailable.
+protocol implementation. The effective override path and complete selected
+implementation/runtime trees are represented only by digests. Provider token
+usage and provider-observed model IDs are reported only when emitted by the
+SDK; missing usage remains explicitly unavailable and prevents exact live-model
+attestation.

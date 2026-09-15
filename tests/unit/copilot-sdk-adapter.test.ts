@@ -133,6 +133,7 @@ class FakeClient implements SdkClientLike {
         type: "session.created",
         timestamp: "2030-01-01T00:00:00.000Z"
       });
+      this.session.on(onEvent as (event: SdkEvent) => void);
     }
     return this.session;
   }
@@ -149,6 +150,7 @@ class FakeClient implements SdkClientLike {
         type: "session.resumed",
         timestamp: "2030-01-01T00:00:00.000Z"
       });
+      this.session.on(onEvent as (event: SdkEvent) => void);
     }
     return this.session;
   }
@@ -197,7 +199,11 @@ function fakeSdk(client: FakeClient, tools: DefinedTool[]): SdkModuleLike {
 function createAdapter(
   client: FakeClient,
   tools: DefinedTool[] = [],
-  cleanupTimeoutMs?: number
+  cleanupTimeoutMs?: number,
+  onTimeout?: (details: {
+    runId: string;
+    sessionId: string;
+  }) => Promise<void> | void
 ): OptionalCopilotSdkAdapter {
   return new OptionalCopilotSdkAdapter(
     async () => fakeSdk(client, tools),
@@ -206,8 +212,13 @@ function createAdapter(
       validate: () => success(undefined)
     },
     cleanupTimeoutMs === undefined
-      ? {}
-      : { cleanupTimeoutMs }
+      ? onTimeout === undefined
+        ? {}
+        : { onTimeout }
+      : {
+          cleanupTimeoutMs,
+          ...(onTimeout === undefined ? {} : { onTimeout })
+        }
   );
 }
 
@@ -557,8 +568,13 @@ describe("optional GitHub Copilot SDK adapter", () => {
     const timeoutAdapter = createAdapter(
       timeoutClient,
       [],
-      10
+      10,
+      () => {
+        expect(timeoutClient.session.aborted).toBe(false);
+        timeoutPersisted = true;
+      }
     );
+    let timeoutPersisted = false;
     const timedOut = await timeoutAdapter.send(
       request(timeoutAdapter, { timeoutMs: 5 })
     );
@@ -569,6 +585,7 @@ describe("optional GitHub Copilot SDK adapter", () => {
         abortCompleted: false
       });
     }
+    expect(timeoutPersisted).toBe(true);
 
     const closeClient = new FakeClient();
     const closeAdapter = createAdapter(closeClient, [], 10);

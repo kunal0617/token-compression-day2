@@ -67,7 +67,9 @@ same digest with `--approve-manifest <digest>`.
 Every live trial uses a fresh empty-mode Copilot session and an exact pinned
 model. The replay manifest and execution receipt bind the effective installed
 SDK ESM/CommonJS entries, runtime wrapper, native `runtime.node`, protocol
-implementation, model, context tier, permissions, and applied session settings.
+implementation, complete ESM/CJS implementation trees, effective runtime
+dependency directory, privacy-safe override-path digest, model, context tier,
+permissions, and applied session settings.
 The exact model must be present and enabled in the live catalog. Permissions
 default to evidence/source/network only; shell and write are disabled. The
 runner rehashes payloads before each trial, scans outbound and response bytes,
@@ -75,6 +77,11 @@ persists structured terminal timeout state, and bounds abort/disconnect/client
 cleanup separately. Resume compares the complete runtime configuration and
 skips completed, failed, timed-out, blocked, and interrupted trials, preventing
 duplicate model calls.
+
+Provider-observed usage events must name the exact approved model. The runner
+uses a single event collector to avoid double-counting provider tokens, tools,
+and permission outcomes. The SDK timeout callback persists terminal timeout
+state before bounded abort cleanup begins.
 
 `cq03-incomplete` and `cq06-missing` are scored as deterministic correct
 abstentions without model calls. `cq03-complete` and `cq06-observed` run live.
@@ -102,7 +109,10 @@ measurements are recorded as unavailable rather than zero. Local `o200k_base`
 counts remain local diagnostics and are never presented as provider usage.
 Reports require a terminal state with every trial accounted for, calculate arm
 means from complete A/B pairs only, and atomically replace prior generated
-formats.
+formats. Expected/actual facts are parsed as role-scoped clauses with exact
+token boundaries; role inversion is scored as a contradiction. Markdown emits
+global helper/advice sections once, while CSV includes terminal statuses,
+helper N/A, and deterministic advice rows even when no score row exists.
 
 The shareable report contains no prompts or responses. It links only to the
 relative ignored run directory. Detailed responses remain local and are

@@ -234,7 +234,9 @@ function modelReport(
   contracts: ReadonlyMap<string, BenchmarkCaseContract>
 ): BenchmarkModelReport {
   const scores = state.manifest.plans
-    .filter((plan) => plan.modelId === modelId)
+    .filter(
+      (plan) => plan.modelId === modelId && !plan.helper
+    )
     .flatMap((plan) => {
       const contract = contracts.get(plan.caseId);
       const record = state.trials[plan.trialId];
@@ -317,6 +319,7 @@ function modelReport(
     const record = state.trials[plan.trialId];
     return (
       plan.modelId === modelId &&
+      !plan.helper &&
       record !== undefined &&
       ["failed", "timeout", "interrupted", "blocked"].includes(
         record.status
@@ -341,6 +344,7 @@ function modelReport(
         state.manifest.plans.filter(
           (plan) =>
             plan.modelId === modelId &&
+            !plan.helper &&
             state.trials[plan.trialId]?.status === status
         ).length
       ])

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import {
   existsSync,
   readFileSync,
+  realpathSync,
   readdirSync,
   statSync
 } from "node:fs";
@@ -94,6 +95,13 @@ function adapterMetadata(): ProducerMetadata {
 
 export const benchmarkSdkMetadata = adapterMetadata();
 const require = createRequire(import.meta.url);
+const runtimeIdentityCache = new Map<
+  string,
+  {
+    executableDigest: string;
+    protocolDigest: string;
+  }
+>();
 
 function implementationTreeDigest(input: {
   readonly root: string;
@@ -129,9 +137,33 @@ function implementationTreeDigest(input: {
 }
 
 function resolvePackageRootByName(
-  packageName: string
+  packageName: string,
+  requiringPackageRoot: string
 ): string | undefined {
-  return (require.resolve.paths(packageName) ?? [])
+  const scopedRequire = createRequire(
+    resolve(requiringPackageRoot, "package.json")
+  );
+  try {
+    const entry = scopedRequire.resolve(packageName);
+    let root = dirname(entry);
+    while (true) {
+      const packagePath = resolve(root, "package.json");
+      if (existsSync(packagePath)) {
+        const metadata = JSON.parse(
+          readFileSync(packagePath, "utf8")
+        ) as { name?: string };
+        if (metadata.name === packageName) {
+          return realpathSync(root);
+        }
+      }
+      const parent = dirname(root);
+      if (parent === root) break;
+      root = parent;
+    }
+  } catch {
+    // Packages without a main/export entry still have a package root.
+  }
+  return (scopedRequire.resolve.paths(packageName) ?? [])
     .map((base) =>
       resolve(base, ...packageName.split("/"))
     )
@@ -144,25 +176,29 @@ function packageTreeDigest(root: string): string {
   return implementationTreeDigest({
     root,
     include: (path) =>
-      !path.includes(`${sep}node_modules${sep}`)
+      !relative(root, path)
+        .split(sep)
+        .includes("node_modules")
   });
 }
 
-function productionDependencyClosureDigest(
+export function benchmarkDependencyClosureDigest(
   rootPackageName: string,
   rootPackagePath: string
 ): string {
   const visited = new Set<string>();
   const packages: {
     name: string;
+    rootDigest: string;
     treeDigest: string;
   }[] = [];
   const visit = (
     packageName: string,
     packageRoot: string
   ): void => {
-    if (visited.has(packageName)) return;
-    visited.add(packageName);
+    const canonicalRoot = realpathSync(packageRoot);
+    if (visited.has(canonicalRoot)) return;
+    visited.add(canonicalRoot);
     const packageJson = JSON.parse(
       readFileSync(
         resolve(packageRoot, "package.json"),
@@ -174,7 +210,8 @@ function productionDependencyClosureDigest(
     };
     packages.push({
       name: packageName,
-      treeDigest: packageTreeDigest(packageRoot)
+      rootDigest: canonicalJsonDigest(canonicalRoot),
+      treeDigest: packageTreeDigest(canonicalRoot)
     });
     const dependencies = [
       ...Object.keys(packageJson.dependencies ?? {}),
@@ -187,7 +224,10 @@ function productionDependencyClosureDigest(
     );
     for (const dependency of dependencies) {
       const dependencyRoot =
-        resolvePackageRootByName(dependency);
+        resolvePackageRootByName(
+          dependency,
+          canonicalRoot
+        );
       if (dependencyRoot !== undefined) {
         visit(dependency, dependencyRoot);
       }
@@ -195,11 +235,16 @@ function productionDependencyClosureDigest(
   };
   visit(rootPackageName, rootPackagePath);
   return canonicalJsonDigest(
-    packages.sort((left, right) =>
-      Buffer.compare(
-        Buffer.from(left.name, "utf8"),
-        Buffer.from(right.name, "utf8")
-      )
+    packages.sort(
+      (left, right) =>
+        Buffer.compare(
+          Buffer.from(left.name, "utf8"),
+          Buffer.from(right.name, "utf8")
+        ) ||
+        Buffer.compare(
+          Buffer.from(left.rootDigest, "utf8"),
+          Buffer.from(right.rootDigest, "utf8")
+        )
     )
   );
 }
@@ -215,11 +260,19 @@ export function benchmarkSdkImplementationTreeDigest(
   });
 }
 
-export function benchmarkSdkRuntimeIdentity(): Result<{
+export function benchmarkSdkRuntimeIdentity(
+  options: { readonly force?: boolean } = {}
+): Result<{
   readonly executableDigest: string;
   readonly protocolDigest: string;
 }> {
   try {
+    const cacheKey =
+      process.env.COPILOT_CLI_PATH ?? "bundled";
+    const cached = runtimeIdentityCache.get(cacheKey);
+    if (cached !== undefined && options.force !== true) {
+      return success(cached);
+    }
     const cjsEntry = require.resolve("@github/copilot-sdk");
     let packageRoot = dirname(cjsEntry);
     while (true) {
@@ -299,18 +352,10 @@ export function benchmarkSdkRuntimeIdentity(): Result<{
       const runtimePackage = useCliNpmPackage
         ? `@github/copilot-${platform}`
         : `@github/copilot-sdk-${platform}`;
-      const searchPaths =
-        require.resolve.paths(runtimePackage) ?? [];
-      const runtimeRoot = searchPaths
-        .map((base) =>
-          resolve(
-            base,
-            ...runtimePackage.split("/")
-          )
-        )
-        .find((candidate) =>
-          existsSync(resolve(candidate, "package.json"))
-        );
+      const runtimeRoot = resolvePackageRootByName(
+        runtimePackage,
+        packageRoot
+      );
       if (runtimeRoot === undefined) {
         throw new Error("SDK runtime package is unavailable");
       }
@@ -333,7 +378,7 @@ export function benchmarkSdkRuntimeIdentity(): Result<{
     const wrapperBytes = readFileSync(wrapperPath);
     const runtimeNodeBytes = readFileSync(runtimeNodePath);
     const sdkImplementationDigest =
-      productionDependencyClosureDigest(
+      benchmarkDependencyClosureDigest(
         "@github/copilot-sdk",
         packageRoot
       );
@@ -343,7 +388,7 @@ export function benchmarkSdkRuntimeIdentity(): Result<{
         : dirname(wrapperPath);
     const runtimeImplementationDigest =
       packageTreeDigest(runtimePackageRoot);
-    return success({
+    const identity = {
       executableDigest: canonicalJsonDigest({
         packageSha256: sha256Base64Url(packageBytes),
         cjsEntrySha256: sha256Base64Url(cjsEntryBytes),
@@ -368,7 +413,9 @@ export function benchmarkSdkRuntimeIdentity(): Result<{
           exactApplicationPayload: true
         }
       })
-    });
+    };
+    runtimeIdentityCache.set(cacheKey, identity);
+    return success(identity);
   } catch {
     return failure(
       "IO_ERROR",
@@ -789,17 +836,23 @@ export type BenchmarkAgentFactory = (
       readonly runId: string;
       readonly sessionId: string;
     }) => Promise<void> | void;
+  },
+  runtimeIdentity?: {
+    readonly executableDigest: string;
+    readonly protocolDigest: string;
   }
 ) => BenchmarkAgentAdapter;
 
 const defaultAgentFactory: BenchmarkAgentFactory = (
   authority,
-  hooks
+  hooks,
+  runtimeIdentity
 ) =>
   (() => {
-    const identity = benchmarkSdkRuntimeIdentity();
-    if (!identity.ok) {
-      throw new Error(identity.error.message);
+    if (runtimeIdentity === undefined) {
+      throw new Error(
+        "Benchmark runtime identity is required"
+      );
     }
     const adapter = new OptionalCopilotSdkAdapter(
       undefined,
@@ -812,8 +865,8 @@ const defaultAgentFactory: BenchmarkAgentFactory = (
     );
     return {
       metadata: adapter.metadata,
-      executableDigest: identity.value.executableDigest,
-      protocolDigest: identity.value.protocolDigest,
+      executableDigest: runtimeIdentity.executableDigest,
+      protocolDigest: runtimeIdentity.protocolDigest,
       listModels: (workingDirectory?: string) =>
         adapter.listModels(workingDirectory),
       send: (request: ApprovedAgentSendRequest) =>
@@ -915,21 +968,26 @@ function literalPresent(text: string, value: string): boolean {
   const normalized = value.trim();
   if (normalized.length === 0) return false;
   if (/^[A-Za-z0-9_.-]+$/.test(normalized)) {
+    const leftBoundary = /^[A-Za-z0-9_]/.test(normalized)
+      ? "(?<![A-Za-z0-9_])"
+      : "";
+    const rightBoundary = /[A-Za-z0-9_]$/.test(normalized)
+      ? "(?![A-Za-z0-9_])"
+      : "";
     return new RegExp(
-      `(?<![A-Za-z0-9_.-])${escaped(
+      `${leftBoundary}${escaped(
         normalized
-      )}(?![A-Za-z0-9_.-])`,
+      )}${rightBoundary}`,
       "i"
     ).test(text);
   }
   return text.toLowerCase().includes(normalized.toLowerCase());
 }
 
-function rolePresent(
-  text: string,
-  role: "expected" | "actual",
-  value: string
-): boolean {
+function roleAssignments(text: string): {
+  role: "expected" | "actual";
+  clause: string;
+}[] {
   const assignments: {
     role: "expected" | "actual";
     clause: string;
@@ -947,7 +1005,15 @@ function rolePresent(
       clause
     });
   }
-  return assignments.some(
+  return assignments;
+}
+
+function rolePresent(
+  text: string,
+  role: "expected" | "actual",
+  value: string
+): boolean {
+  return roleAssignments(text).some(
     (assignment) =>
       assignment.role === role &&
       literalPresent(assignment.clause, value)
@@ -991,14 +1057,28 @@ function contradictionCount(
   contract: BenchmarkCaseContract,
   response: string
 ): number {
-  const text = response.toLowerCase();
+  const assignments = roleAssignments(response);
   const explicit = contract.requiredFacts.filter((fact) => {
-    const value = fact.value.toLowerCase();
-    return (
-      text.includes(`not ${value}`) ||
-      text.includes(`instead of ${value}`) ||
-      text.includes(`contradicts ${value}`)
-    );
+    const factRole =
+      fact.kind === "expected"
+        ? "expected"
+        : fact.kind === "actual"
+          ? "actual"
+          : undefined;
+    if (factRole !== undefined) {
+      return assignments.some(
+        (assignment) =>
+          assignment.role === factRole &&
+          new RegExp(
+            `\\bnot\\s+${escaped(fact.value)}(?:\\b|$)`,
+            "i"
+          ).test(assignment.clause)
+      );
+    }
+    return new RegExp(
+      `\\bcontradicts\\s+${escaped(fact.value)}(?:\\b|$)`,
+      "i"
+    ).test(response);
   }).length;
   const expected = contract.requiredFacts.filter(
     (fact) => fact.kind === "expected"
@@ -1318,6 +1398,38 @@ export async function runBenchmarkLive(input: {
   if (!approvedState.ok) return approvedState;
   saved = approvedState;
   const factory = input.agentFactory ?? defaultAgentFactory;
+  let executionRuntime:
+    | {
+        readonly executableDigest: string;
+        readonly protocolDigest: string;
+      }
+    | undefined;
+  if (input.agentFactory === undefined) {
+    const runtime = benchmarkSdkRuntimeIdentity({
+      force: true
+    });
+    if (!runtime.ok) return runtime;
+    executionRuntime = runtime.value;
+    if (
+      current.manifest.modelBlocks.some(
+        (block) =>
+          block.executableDigest !==
+            runtime.value.executableDigest ||
+          block.protocolDigest !==
+            runtime.value.protocolDigest
+      ) ||
+      (current.manifest.helperBlock !== undefined &&
+        (current.manifest.helperBlock.executableDigest !==
+          runtime.value.executableDigest ||
+          current.manifest.helperBlock.protocolDigest !==
+            runtime.value.protocolDigest))
+    ) {
+      return failure(
+        "INTEGRITY_ERROR",
+        "Installed Copilot runtime changed after manifest approval"
+      );
+    }
+  }
 
   for (const plan of current.manifest.plans) {
     if (saved.value.trials[plan.trialId] !== undefined) continue;
@@ -1527,8 +1639,10 @@ export async function runBenchmarkLive(input: {
     let timeoutPersistenceFailure:
       | Result<BenchmarkRunState>
       | undefined;
-    const adapter = factory(authority, {
-      onTimeout: async () => {
+    const adapter = factory(
+      authority,
+      {
+        onTimeout: async () => {
         timeoutPersisted = true;
         mutableTrials[plan.trialId] = terminalRecord(plan, {
           status: "timeout",
@@ -1558,8 +1672,10 @@ export async function runBenchmarkLive(input: {
         } else {
           timeoutPersistenceFailure = persisted;
         }
-      }
-    });
+        }
+      },
+      executionRuntime
+    );
     const modelBlock = current.manifest.modelBlocks.find(
       (block) => block.modelId === plan.modelId
     );

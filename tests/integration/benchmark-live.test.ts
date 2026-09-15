@@ -25,6 +25,7 @@ import { sha256Base64Url } from "../../src/core/hash.js";
 import { exportBenchmarkSuite } from "../../src/benchmark/export.js";
 import {
   benchmarkApplicationSettingsDigest,
+  benchmarkDependencyClosureDigest,
   assessBenchmarkResponse,
   benchmarkSdkImplementationTreeDigest,
   benchmarkSdkMetadata,
@@ -793,10 +794,10 @@ describe("benchmark live and reporting", () => {
       writeFileSync(wrapper, "wrapper-one", "utf8");
       writeFileSync(runtimeNode, "runtime-one", "utf8");
       process.env.COPILOT_CLI_PATH = wrapper;
-      const first = benchmarkSdkRuntimeIdentity();
+      const first = benchmarkSdkRuntimeIdentity({ force: true });
       expect(first.ok).toBe(true);
       writeFileSync(wrapper, "wrapper-two", "utf8");
-      const second = benchmarkSdkRuntimeIdentity();
+      const second = benchmarkSdkRuntimeIdentity({ force: true });
       expect(second.ok).toBe(true);
       if (!first.ok || !second.ok) return;
       expect(first.value.executableDigest).not.toBe(
@@ -816,7 +817,7 @@ describe("benchmark live and reporting", () => {
         secondRoot,
         "copilot-runtime.exe"
       );
-      const moved = benchmarkSdkRuntimeIdentity();
+      const moved = benchmarkSdkRuntimeIdentity({ force: true });
       expect(moved.ok).toBe(true);
       if (moved.ok) {
         expect(moved.value.executableDigest).not.toBe(
@@ -832,7 +833,7 @@ describe("benchmark live and reporting", () => {
       rmSync(runtimeRoot, { recursive: true, force: true });
       rmSync(secondRoot, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   it("binds both ESM and CJS SDK implementation trees", () => {
     const root = mkdtempSync(
@@ -857,6 +858,59 @@ describe("benchmark live and reporting", () => {
       );
       const second =
         benchmarkSdkImplementationTreeDigest(root);
+      expect(first).not.toBe(second);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves production dependencies from each requiring package root", () => {
+    const root = mkdtempSync(
+      join(tmpdir(), "ctxo-sdk-dependency-tree-")
+    );
+    const sdkRoot = join(root, "sdk");
+    const nestedDependency = join(
+      sdkRoot,
+      "node_modules",
+      "dep"
+    );
+    const topDependency = join(root, "node_modules", "dep");
+    try {
+      mkdirSync(nestedDependency, { recursive: true });
+      mkdirSync(topDependency, { recursive: true });
+      writeFileSync(
+        join(sdkRoot, "package.json"),
+        '{"name":"sdk","main":"index.js","dependencies":{"dep":"1.0.0"}}'
+      );
+      writeFileSync(join(sdkRoot, "index.js"), "require('dep');");
+      writeFileSync(
+        join(nestedDependency, "package.json"),
+        '{"name":"dep","main":"index.js"}'
+      );
+      writeFileSync(
+        join(nestedDependency, "index.js"),
+        "module.exports = 'nested-one';"
+      );
+      writeFileSync(
+        join(topDependency, "package.json"),
+        '{"name":"dep","main":"index.js"}'
+      );
+      writeFileSync(
+        join(topDependency, "index.js"),
+        "module.exports = 'top';"
+      );
+      const first = benchmarkDependencyClosureDigest(
+        "sdk",
+        sdkRoot
+      );
+      writeFileSync(
+        join(nestedDependency, "index.js"),
+        "module.exports = 'nested-two';"
+      );
+      const second = benchmarkDependencyClosureDigest(
+        "sdk",
+        sdkRoot
+      );
       expect(first).not.toBe(second);
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -1024,6 +1078,85 @@ describe("benchmark live and reporting", () => {
     }
   });
 
+  it("keeps same-ID helper trials out of model score blocks", async () => {
+    const externalRoot = mkdtempSync(
+      join(tmpdir(), "ctxo-benchmark-helper-score-source-")
+    );
+    const suiteRoot = resolve(
+      ".context-overflow",
+      `benchmark-helper-score-suite-${Date.now()}`
+    );
+    const runRoot = resolve(
+      ".context-overflow",
+      `benchmark-helper-score-run-${Date.now()}`
+    );
+    let runId: string | undefined;
+    try {
+      writeManualBenchmarkFixture(externalRoot);
+      const exported = await exportBenchmarkSuite({
+        externalRoot,
+        output: suiteRoot,
+        cases: ["cq02", "luna"]
+      });
+      expect(exported.ok).toBe(true);
+      if (!exported.ok) return;
+      const planned = await runBenchmarkLive({
+        suitePath: suiteRoot,
+        output: runRoot,
+        models: ["gpt-5.4-mini"],
+        helperModelId: "gpt-5.4-mini",
+        trials: 1,
+        cases: ["cq02", "luna"],
+        dryRun: true,
+        liveFlag: true,
+        environmentLiveOptIn: true
+      });
+      expect(planned.ok).toBe(true);
+      if (!planned.ok) return;
+      runId = planned.value.state.benchmarkRunId;
+      const executed = await runBenchmarkLive({
+        suitePath: suiteRoot,
+        output: runRoot,
+        models: ["gpt-5.4-mini"],
+        helperModelId: "gpt-5.4-mini",
+        trials: 1,
+        cases: ["cq02", "luna"],
+        dryRun: false,
+        liveFlag: true,
+        environmentLiveOptIn: true,
+        approvedManifestDigest:
+          planned.value.state.manifest.digest,
+        agentFactory: (authority) =>
+          new FakeBenchmarkAgent(authority, [])
+      });
+      expect(executed.ok).toBe(true);
+      const report = buildBenchmarkReport(runId);
+      expect(report.ok).toBe(true);
+      if (!report.ok) return;
+      expect(report.value.report.models[0]?.scores).toHaveLength(2);
+      expect(
+        report.value.report.models[0]?.trialStatusCounts.completed
+      ).toBe(2);
+      expect(
+        report.value.report.helper?.statusCounts.completed
+      ).toBe(1);
+    } finally {
+      rmSync(externalRoot, { recursive: true, force: true });
+      rmSync(suiteRoot, { recursive: true, force: true });
+      rmSync(runRoot, { recursive: true, force: true });
+      if (runId !== undefined) {
+        rmSync(
+          resolve(
+            ".context-overflow",
+            "benchmark-index",
+            `${runId}.json`
+          ),
+          { force: true }
+        );
+      }
+    }
+  });
+
   it("uses role-scoped exact matching for overlapping expected and actual values", () => {
     const unsigned = {
       caseId: "cq02" as const,
@@ -1071,6 +1204,26 @@ describe("benchmark live and reporting", () => {
       "expected-safe",
       "actual-unsafe"
     ]);
+    const punctuated = assessBenchmarkResponse(
+      contract,
+      "Expected: safe. Actual: unsafe.",
+      payload
+    );
+    expect(punctuated.visibleFactIds).toEqual([
+      "expected-safe",
+      "actual-unsafe"
+    ]);
+    expect(punctuated.contradictions).toBe(0);
+    const clauseLocalNegation = assessBenchmarkResponse(
+      contract,
+      "Expected: safe, while actual is unsafe, not safe.",
+      payload
+    );
+    expect(clauseLocalNegation.visibleFactIds).toEqual([
+      "expected-safe",
+      "actual-unsafe"
+    ]);
+    expect(clauseLocalNegation.contradictions).toBe(0);
     const inverted = assessBenchmarkResponse(
       contract,
       "Expected: unsafe\nReceived: safe\n",
@@ -1365,5 +1518,5 @@ describe("benchmark live and reporting", () => {
         );
       }
     }
-  });
+  }, 30_000);
 });

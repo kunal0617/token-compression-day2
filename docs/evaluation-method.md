@@ -56,3 +56,9 @@ npm run parity:external -- --root <external-manual-root>
 Its ignored local report contains case IDs, pass/fail/not-applicable status,
 metrics, reasons, and digests only. Private fixture content is never copied or
 reported.
+
+The production comparative workflow is documented in
+[`benchmark-testing.md`](benchmark-testing.md). It exports local original and
+prepared payload pairs, creates a canonical approval-bound call plan, executes
+fresh-session model trials with resumable terminal state, and emits content-safe
+per-model JSON/Markdown/CSV reports.

@@ -142,6 +142,7 @@ export type BenchmarkTrialStatus =
 
 export interface BenchmarkExecutionReceipt {
   readonly adapterProducerId: string;
+  readonly adapterProducerDigest: string;
   readonly executableDigest: string;
   readonly protocolDigest: string;
   readonly actualModelId: string;

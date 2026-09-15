@@ -81,11 +81,11 @@ function adapterMetadata(): ProducerMetadata {
   ).metadata;
 }
 
-const sdkMetadata = adapterMetadata();
+export const benchmarkSdkMetadata = adapterMetadata();
 const sdkExecutableDigest = canonicalJsonDigest({
   package: "@github/copilot-sdk",
   version: "1.0.13",
-  adapterDigest: sdkMetadata.digest
+  adapterDigest: benchmarkSdkMetadata.digest
 });
 const sdkProtocolDigest = canonicalJsonDigest({
   protocol: "ctxo-benchmark-copilot-sdk",
@@ -164,7 +164,7 @@ function modelBlocks(models: readonly string[]): Result<readonly BenchmarkModelB
         modelId,
         settingsDigest: canonicalJsonDigest(settings),
         permissionDigest: canonicalJsonDigest(permissions),
-        adapterId: sdkMetadata.producerId,
+        adapterId: benchmarkSdkMetadata.producerId,
         executableDigest: sdkExecutableDigest,
         protocolDigest: sdkProtocolDigest
       };
@@ -850,7 +850,7 @@ export async function runBenchmarkLive(input: {
       evidenceDecision: "ready",
       tokenizer: "o200k_base",
       target: {
-        adapterId: sdkMetadata.producerId,
+        adapterId: benchmarkSdkMetadata.producerId,
         modelId: plan.modelId,
         workingDirectory: output.value,
         permissions: trialPermissions
@@ -972,6 +972,45 @@ export async function runBenchmarkLive(input: {
         })
       });
     } else {
+      const duplicateSession = Object.values(mutableTrials).some(
+        (record) =>
+          record.execution?.sessionId === sent.value.sessionId
+      );
+      if (
+        sent.value.modelId !== plan.modelId ||
+        sent.value.applicationPayloadSha256 !==
+          identity.sha256 ||
+        canonicalJsonDigest(sent.value.producer) !==
+          canonicalJsonDigest(benchmarkSdkMetadata) ||
+        duplicateSession
+      ) {
+        mutableTrials[plan.trialId] = terminalRecord(plan, {
+          status: "failed",
+          startedAt:
+            running.startedAt ?? new Date().toISOString(),
+          completedAt: new Date().toISOString(),
+          sent: true,
+          abstained: false,
+          securityAssessmentDigest: assessment.digest,
+          errorCode: "EXECUTION_RECEIPT_MISMATCH",
+          errorDigest: canonicalJsonDigest({
+            actualModelId: sent.value.modelId ?? null,
+            actualPayloadSha256:
+              sent.value.applicationPayloadSha256,
+            producer: sent.value.producer,
+            duplicateSession
+          })
+        });
+        const update = saveRunState(output.value, {
+          ...stateWithoutDigest(saved.value),
+          trials: { ...mutableTrials },
+          status: "running",
+          updatedAt: new Date().toISOString()
+        });
+        if (!update.ok) return update;
+        saved = update;
+        continue;
+      }
       const response = sent.value.responseText ?? "";
       const responseSecurity = assessSecurity([
         {
@@ -1038,6 +1077,7 @@ export async function runBenchmarkLive(input: {
           securityAssessmentDigest: responseSecurity.digest,
           execution: {
             adapterProducerId: sent.value.producer.producerId,
+            adapterProducerDigest: sent.value.producer.digest,
             executableDigest: sdkExecutableDigest,
             protocolDigest: sdkProtocolDigest,
             actualModelId: sent.value.modelId ?? plan.modelId,

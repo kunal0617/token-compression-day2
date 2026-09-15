@@ -299,6 +299,19 @@ report under ignored `.context-overflow/`, and never copies fixture content
 into the repository. Luna live execution remains explicitly not applicable in
 this read-only comparison.
 
+Comparative original/prepared benchmark suites, approval-bound live runs, and
+content-safe reports are available through:
+
+```shell
+node dist\src\main.js benchmark export --root <external-manual-root> --output .context-overflow\benchmark-suite
+node dist\src\main.js benchmark live --suite .context-overflow\benchmark-suite --models claude-opus-5,gpt-5.4-mini --trials 3 --output .context-overflow\benchmark-run --dry-run
+node dist\src\main.js benchmark report --run <benchmark-run-id> --format markdown
+```
+
+See [`docs/benchmark-testing.md`](docs/benchmark-testing.md). Full live
+evaluation requires both `CTXO_LIVE_EVALUATION=1` and `--live`, followed by
+exact replay-manifest digest approval.
+
 The tests cover byte indexing and encodings, classifier conflicts, protected
 duplicates, exact and template reductions, strict handles, committed visibility,
 transaction rollback, mutation failures, property-based reconstruction, and a

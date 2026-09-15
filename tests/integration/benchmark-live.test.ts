@@ -21,6 +21,7 @@ import { canonicalJsonDigest } from "../../src/core/canonical.js";
 import { sha256Base64Url } from "../../src/core/hash.js";
 import { exportBenchmarkSuite } from "../../src/benchmark/export.js";
 import {
+  benchmarkSdkMetadata,
   type BenchmarkAgentAdapter,
   runBenchmarkLive
 } from "../../src/benchmark/live.js";
@@ -31,24 +32,27 @@ import {
 import { runCli } from "../../src/main.js";
 import { writeManualBenchmarkFixture } from "../helpers/manual-benchmark-fixture.js";
 
-const producer: ProducerMetadata = {
-  producerId: "optional.github.copilot-sdk-adapter",
-  kind: "coding-agent",
-  version: "1.0.0",
-  digest: canonicalJsonDigest("fake-benchmark-agent")
-};
+const producer: ProducerMetadata = benchmarkSdkMetadata;
 
 class FakeBenchmarkAgent implements BenchmarkAgentAdapter {
   readonly metadata = producer;
   readonly #authority: AgentRunScopeAuthority;
   readonly requests: ApprovedAgentSendRequest[];
+  readonly #overrideModelId: string | undefined;
+  readonly #fixedSessionId: string | undefined;
 
   constructor(
     authority: AgentRunScopeAuthority,
-    requests: ApprovedAgentSendRequest[]
+    requests: ApprovedAgentSendRequest[],
+    options: {
+      readonly overrideModelId?: string;
+      readonly fixedSessionId?: string;
+    } = {}
   ) {
     this.#authority = authority;
     this.requests = requests;
+    this.#overrideModelId = options.overrideModelId;
+    this.#fixedSessionId = options.fixedSessionId;
   }
 
   async send(
@@ -60,11 +64,13 @@ class FakeBenchmarkAgent implements BenchmarkAgentAdapter {
     const responseText = request.approved.bytes.toString("utf8");
     return success({
       runId: request.runId,
-      sessionId: `session-${request.runId}`,
+      sessionId:
+        this.#fixedSessionId ?? `session-${request.runId}`,
       ...(request.approved.subject.target.modelId === undefined
         ? {}
         : {
             modelId:
+              this.#overrideModelId ??
               request.approved.subject.target.modelId
           }),
       applicationPayloadSha256: sha256Base64Url(
@@ -367,6 +373,7 @@ describe("benchmark live and reporting", () => {
             40
           )}\nProcess exited with code 1\n`
       });
+
       const exported = await exportBenchmarkSuite({
         externalRoot,
         output: suiteRoot,
@@ -410,6 +417,85 @@ describe("benchmark live and reporting", () => {
         executed.ok &&
           Object.values(executed.value.state.trials).every(
             (record) => record.status === "blocked"
+          )
+      ).toBe(true);
+    } finally {
+      rmSync(externalRoot, { recursive: true, force: true });
+      rmSync(suiteRoot, { recursive: true, force: true });
+      rmSync(runRoot, { recursive: true, force: true });
+      if (runId !== undefined) {
+        rmSync(
+          resolve(
+            ".context-overflow",
+            "benchmark-index",
+            `${runId}.json`
+          ),
+          { force: true }
+        );
+      }
+    }
+  });
+
+  it("fails closed on model or session receipt mismatch", async () => {
+    const externalRoot = mkdtempSync(
+      join(tmpdir(), "ctxo-benchmark-receipt-source-")
+    );
+    const suiteRoot = resolve(
+      ".context-overflow",
+      `benchmark-receipt-suite-${Date.now()}`
+    );
+    const runRoot = resolve(
+      ".context-overflow",
+      `benchmark-receipt-run-${Date.now()}`
+    );
+    let runId: string | undefined;
+    try {
+      writeManualBenchmarkFixture(externalRoot);
+      const exported = await exportBenchmarkSuite({
+        externalRoot,
+        output: suiteRoot,
+        cases: ["cq02"]
+      });
+      expect(exported.ok).toBe(true);
+      if (!exported.ok) return;
+      const planned = await runBenchmarkLive({
+        suitePath: suiteRoot,
+        output: runRoot,
+        models: ["gpt-5.4-mini"],
+        trials: 1,
+        cases: ["cq02"],
+        dryRun: true,
+        liveFlag: true,
+        environmentLiveOptIn: true
+      });
+      expect(planned.ok).toBe(true);
+      if (!planned.ok) return;
+      runId = planned.value.state.benchmarkRunId;
+      const executed = await runBenchmarkLive({
+        suitePath: suiteRoot,
+        output: runRoot,
+        models: ["gpt-5.4-mini"],
+        trials: 1,
+        cases: ["cq02"],
+        dryRun: false,
+        liveFlag: true,
+        environmentLiveOptIn: true,
+        approvedManifestDigest:
+          planned.value.state.manifest.digest,
+        agentFactory: (authority) =>
+          new FakeBenchmarkAgent(authority, [], {
+            overrideModelId: "wrong-model",
+            fixedSessionId: "shared-session"
+          })
+      });
+      expect(executed.ok).toBe(true);
+      expect(
+        executed.ok &&
+          Object.values(executed.value.state.trials).every(
+            (record) =>
+              record.status === "failed" &&
+              record.errorCode ===
+                "EXECUTION_RECEIPT_MISMATCH"
           )
       ).toBe(true);
     } finally {
